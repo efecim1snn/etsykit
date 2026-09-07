@@ -331,6 +331,11 @@ class EtsyClient:
             f"/shops/{self.shop_id()}/listings", params=params, max_items=max_items
         )
 
+    def listing(self, listing_id: int, *, includes: Sequence[str] | None = None) -> dict[str, Any]:
+        """One listing by id. Key-only endpoint — no OAuth scope needed."""
+        params = {"includes": ",".join(includes)} if includes else None
+        return self.get(f"/listings/{listing_id}", params=params, authed=False)
+
     def create_draft_listing(self, fields: dict[str, Any]) -> dict[str, Any]:
         return self.post(f"/shops/{self.shop_id()}/listings", form=fields)
 

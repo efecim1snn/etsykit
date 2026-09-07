@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-09-08
+
+### Added
+
+- **`etsykit drop` — designs in a folder, drafts out.** For print-on-demand sellers who
+  do not want to fill in a spreadsheet.
+  - `drop init` creates a three-folder workspace (`1-MOCKUPS`, `2-PRODUCTS`, `3-DRAFTS`)
+    with a README in Turkish and English.
+  - `drop template --from-listing <id>` copies category, shipping profile, return
+    policy, price, processing times and materials from one listing you built by hand.
+    Those cannot be derived from an image, and guessing them would put wrong listings in
+    a real shop.
+  - `drop run` composites each design onto every mockup with Pillow, appends the flat
+    artwork, works out the product concept, researches it, and writes titles and 13 tags
+    inside Etsy's limits into a `review.csv` that `listings push` already consumes.
+- **Print areas are stored as fractions of the mockup, not pixels**, so one calibrated
+  rectangle covers every sibling mockup of the same size and a sensible default works
+  before anything is calibrated. It also makes the compositor testable in CI on
+  generated images, with no assets in the repository.
+- **A filename that carries no concept is skipped, not guessed.** `IMG_2043.png` is
+  reported with a reason instead of becoming a confidently-wrong title. Files in a named
+  subfolder fall back to the folder name.
+- **Thin or absent market data is stated on the row** rather than padded out. Without
+  research the titles are shorter and fewer tag slots fill, and the CSV says so.
+- New dependency: **Pillow**, which ships prebuilt wheels everywhere and needs no
+  compiler — the reason the image half is Python rather than a Node/Sharp sidecar.
+
 ### Fixed
 
 From an external offline code review (7 September 2026) that ran the tool against mock
@@ -80,5 +107,6 @@ re-derive them:
 - There is no idempotency key, so non-idempotent writes are never retried on a timeout
   or a 5xx — a repeat would mean a duplicate listing, or a second email to a buyer.
 
-[Unreleased]: https://github.com/efecim1snn/etsykit/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/efecim1snn/etsykit/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/efecim1snn/etsykit/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/efecim1snn/etsykit/releases/tag/v0.1.0

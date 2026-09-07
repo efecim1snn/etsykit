@@ -304,6 +304,58 @@ etsykit listings push current.csv           # push the edits back
 
 ---
 
+## Drop designs, get drafts
+
+For print-on-demand: put designs in a folder, get composited mockups and a ready-to-push
+CSV. No spreadsheet to fill in by hand.
+
+```bash
+etsykit drop init                                # creates ~/Desktop/Etsy Studio
+etsykit drop template --from-listing 1234567890  # copy settings from a listing you built
+etsykit drop run                                 # designs in → review.csv out
+```
+
+**You build the first listing yourself, in Etsy, properly.** Everything after copies it.
+That is not laziness on the tool's part: `taxonomy_id`, `shipping_profile_id`,
+`return_policy_id`, `who_made`, `when_made`, processing times and price are decisions
+about a business, not facts about a picture. Guessing them would put wrong listings in a
+real shop.
+
+The workspace is three folders:
+
+| Folder | What goes in it |
+|---|---|
+| `1-MOCKUPS` | Your mockup templates — a blank shirt, mug, poster. Once. |
+| `2-PRODUCTS` | The designs you want listed. This is the one you use every time. |
+| `3-DRAFTS` | What comes out: composited images and `review.csv`. |
+
+`drop run` composites each design onto every mockup, appends the flat artwork, works out
+the product concept, researches it against listings that actually rank, and writes titles
+and 13 tags inside Etsy's limits. **Nothing is sent to Etsy.** Check `review.csv`, then:
+
+```bash
+etsykit listings push "3-DRAFTS/2026-09-07-212841/review.csv" --dry-run
+etsykit listings push "3-DRAFTS/2026-09-07-212841/review.csv"      # creates drafts
+```
+
+Print areas are stored as **fractions** of the mockup, not pixels, in
+`1-MOCKUPS/positions.json`. One calibrated rectangle therefore covers every sibling
+mockup of the same dimensions, and a sensible default works before you calibrate anything.
+
+Two things it will tell you rather than hide:
+
+- **A filename it cannot read is skipped, not guessed.** `mountain-sunset.png` gives a
+  concept; `IMG_2043.png` does not, and inventing a confident title for it would put the
+  wrong listing in your shop. Files inside a named subfolder fall back to the folder name.
+- **Thin or absent market data is stated on the row.** Without research the titles are
+  shorter and fewer of the 13 tag slots fill — and the CSV says so in its `warnings`
+  column instead of padding them out with something invented.
+
+The drop flow never writes a `listing_id`, and Etsy only accepts a state change on an
+update — so it is structurally incapable of publishing anything.
+
+---
+
 ## Orders and tracking
 
 ```bash
@@ -409,6 +461,9 @@ does not convert, and Etsy weights conversion heavily.
 | `etsykit shop info` | Shop identifiers and headline numbers |
 | `etsykit shop profiles` | Shipping profiles, return policies, sections |
 | `etsykit shop taxonomy <word>` | Find a `taxonomy_id` |
+| `etsykit drop init` | Create the designs-in workspace folder |
+| `etsykit drop template` | Copy settings from a listing you built by hand |
+| `etsykit drop run` | Designs → mockups, titles, tags → `review.csv` |
 | `etsykit listings template` | Write a starter CSV |
 | `etsykit listings pull` | Export listings to CSV |
 | `etsykit listings push` | Bulk create/update from CSV |

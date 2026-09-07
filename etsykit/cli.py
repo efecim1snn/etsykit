@@ -17,6 +17,9 @@ from . import orders as orders_mod
 from . import seo as seo_mod
 from .client import EtsyClient
 from .config import Config, split_credential, token_path, write_env_file
+from .drop import pipeline
+from .drop import template as template_mod
+from .drop import workspace as workspace_mod
 from .errors import AuthError, EtsyKitError
 
 
@@ -66,12 +69,16 @@ shop_app = typer.Typer(help="Shop metadata you need to fill in a listing CSV.", 
 listings_app = typer.Typer(help="Export and bulk-create/update listings.", no_args_is_help=True)
 orders_app = typer.Typer(help="Export orders and upload tracking numbers.", no_args_is_help=True)
 seo_app = typer.Typer(help="Audit your listings and research the market.", no_args_is_help=True)
+drop_app = typer.Typer(
+    help="Drop designs in a folder, get a ready-to-push listing CSV.", no_args_is_help=True
+)
 
 app.add_typer(auth_app, name="auth")
 app.add_typer(shop_app, name="shop")
 app.add_typer(listings_app, name="listings")
 app.add_typer(orders_app, name="orders")
 app.add_typer(seo_app, name="seo")
+app.add_typer(drop_app, name="drop")
 
 
 def _client(*, require_auth: bool = True) -> EtsyClient:
@@ -967,6 +974,139 @@ def seo_suggest(
             "your item; irrelevant tags pull in traffic that does not convert, and Etsy "
             "weights conversion heavily.[/]"
         )
+
+
+# ---------------------------------------------------------------- drop
+
+
+def _workspace(path: Optional[Path]) -> workspace_mod.Workspace:
+    return workspace_mod.Workspace(Path(path) if path else workspace_mod.default_root())
+
+
+@drop_app.command("init")
+def drop_init(
+    path: Optional[Path] = typer.Option(None, "--path", help="Where to create it."),
+) -> None:
+    """Create the desktop folder you drop designs into."""
+    ws = _workspace(path).create()
+    _ok(f"Workspace ready at {ws.root}")
+    console.print(
+        f"  [cyan]{workspace_mod.MOCKUPS_DIR}[/]   your mockup templates (once)\n"
+        f"  [cyan]{workspace_mod.PRODUCTS_DIR}[/]  the designs you want listed\n"
+        f"  [cyan]{workspace_mod.DRAFTS_DIR}[/]    what comes out\n"
+    )
+    console.print(
+        "Next: build ONE listing properly in Etsy by hand, then copy its settings:\n"
+        "  [cyan]etsykit drop template --from-listing <listing_id>[/]"
+    )
+
+
+@drop_app.command("template")
+def drop_template(
+    from_listing: int = typer.Option(..., "--from-listing", help="A listing you built by hand."),
+    path: Optional[Path] = typer.Option(None, "--path"),
+) -> None:
+    """Copy the settings every future draft will inherit from one real listing."""
+    ws = _workspace(path).require()
+    with _client(require_auth=False) as client:
+        listing = client.listing(from_listing)
+
+    captured = template_mod.capture(listing)
+    ws.write_template(captured.to_dict())
+    _ok(f"Captured listing {captured.source_listing_id} into {ws.template_path}")
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    for label, value in captured.describe():
+        table.add_row(label, value)
+    console.print(table)
+
+    gaps = captured.missing_for_a_physical_draft()
+    if gaps:
+        _warn(
+            f"This listing has no {', '.join(gaps)}. Drafts will still be created, "
+            "but you cannot publish them until that is set."
+        )
+    console.print(
+        f"\nNow put designs in [cyan]{ws.products}[/] and run: [cyan]etsykit drop run[/]"
+    )
+
+
+@drop_app.command("run")
+def drop_run(
+    path: Optional[Path] = typer.Option(None, "--path"),
+    mockups: int = typer.Option(5, "--mockups", help="Mockups per product (Etsy allows 10 images)."),
+    no_flat: bool = typer.Option(False, "--no-flat", help="Do not append the flat artwork."),
+    sample: int = typer.Option(200, "--sample", help="Listings to sample per concept."),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Ignore cached research."),
+) -> None:
+    """Turn the designs in your folder into a review CSV. Sends nothing to Etsy."""
+    ws = _workspace(path).require()
+    tmpl = template_mod.Template.from_dict(ws.read_template())
+
+    designs = ws.product_files()
+    if not designs:
+        _warn(f"No designs in {ws.products}. Drop some image files in and run again.")
+        raise typer.Exit(1)
+    if not ws.mockup_files():
+        _warn(
+            f"No mockups in {ws.mockups}. Transparent artwork needs one; finished "
+            "product photos do not."
+        )
+
+    client = None
+    try:
+        client = EtsyClient(Config.load(), require_auth=False)
+    except EtsyKitError as exc:
+        _warn(f"Running without market research ({exc.args[0].splitlines()[0]}).")
+
+    images_each = min(mockups, len(ws.mockup_files())) + (0 if no_flat else 1)
+    console.print(
+        f"[dim]{len(designs)} design(s), about {images_each} image(s) each. "
+        f"Creating the drafts later will cost roughly "
+        f"{pipeline.estimate_requests(len(designs), len(designs), images_each)} requests "
+        f"of your 5,000 daily allowance.[/]\n"
+    )
+
+    try:
+        with console.status("Preparing…") as status:
+            report = pipeline.run(
+                ws,
+                tmpl,
+                client=client,
+                mockups_per_product=mockups,
+                include_flat=not no_flat,
+                sample=sample,
+                use_cache=not no_cache,
+                on_progress=lambda msg: status.update(msg),
+            )
+    finally:
+        if client:
+            client.close()
+
+    for row in report.rows:
+        if not row.ok:
+            err_console.print(f"[red]{CROSS}[/] {row.source.name} — {'; '.join(row.warnings)}")
+        else:
+            note = f" [yellow]({len(row.warnings)} warning(s))[/]" if row.warnings else ""
+            console.print(
+                f"[green]{TICK}[/] {row.source.name} → [dim]{row.title[:60]}[/]{note}"
+            )
+
+    console.print()
+    _ok(
+        f"{len(report.ready)} ready, {len(report.skipped)} skipped. "
+        f"{report.images_made} image(s) made across {report.concepts} concept(s) "
+        f"({report.researched} researched, {report.cached} from cache)."
+    )
+    if not report.csv_path:
+        raise typer.Exit(1)
+
+    console.print(f"\nReview it: [cyan]{report.csv_path}[/]")
+    console.print(
+        "Then, when it looks right:\n"
+        f"  [cyan]etsykit listings push \"{report.csv_path}\" --dry-run[/]\n"
+        f"  [cyan]etsykit listings push \"{report.csv_path}\"[/]   [dim](creates drafts)[/]"
+    )
 
 
 def main() -> None:

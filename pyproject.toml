@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "etsykit"
-version = "0.1.0"
+version = "0.1.1"
 description = "Open-source Etsy seller automation CLI: bulk listings, order/tracking sync, and SEO analysis via the official Etsy Open API v3."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -23,14 +23,20 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "python-dotenv>=1.0",
+    # Mockup compositing. Ships prebuilt wheels for Windows, macOS (Intel + ARM) and
+    # Linux with no compiler needed - which is the whole reason the image half is
+    # Python rather than a Node/Sharp sidecar.
+    "pillow>=10.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+heic = ["pillow-heif>=0.16"]
 
 [project.urls]
 Homepage = "https://github.com/efecim1snn/etsykit"
 Issues = "https://github.com/efecim1snn/etsykit/issues"
+Changelog = "https://github.com/efecim1snn/etsykit/blob/main/CHANGELOG.md"
 
 [project.scripts]
 etsykit = "etsykit.cli:main"
@@ -48,8 +54,8 @@ ignore = ["E501"]
 
 [tool.ruff.lint.per-file-ignores]
 # Typer's API is built on both of these:
-#   B008  — typer.Option()/Argument() must be evaluated in the default, that is the contract.
-#   UP045 — Typer resolves annotations at runtime; `X | None` breaks that on Python 3.9
+#   B008  - typer.Option()/Argument() must be evaluated in the default, that is the contract.
+#   UP045 - Typer resolves annotations at runtime; `X | None` breaks that on Python 3.9
 #           even with `from __future__ import annotations`, so Optional[X] stays.
 "etsykit/cli.py" = ["B008", "UP045"]
 
