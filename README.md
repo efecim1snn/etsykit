@@ -512,8 +512,9 @@ Please keep the no-scraping rule: official API endpoints only.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Trademark and third-party notices are in
+[NOTICE.md](NOTICE.md).
 
-etsykit is an independent project, not affiliated with or endorsed by Etsy, Inc.
-You are responsible for complying with the
+etsykit is an independent project, **not affiliated with or endorsed by Etsy, Inc.**
+You remain responsible for complying with the
 [Etsy API Terms of Use](https://www.etsy.com/legal/api) and Etsy's seller policies.
