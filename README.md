@@ -1,5 +1,10 @@
 # etsykit
 
+[![CI](https://github.com/efecim1snn/etsykit/actions/workflows/ci.yml/badge.svg)](https://github.com/efecim1snn/etsykit/actions/workflows/ci.yml)
+[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue)](https://www.python.org/downloads/)
+[![Licence: MIT](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![Etsy Open API v3](https://img.shields.io/badge/Etsy-Open%20API%20v3-orange)](https://developers.etsy.com/documentation/)
+
 Open-source command line automation for Etsy sellers, built on the official
 **Etsy Open API v3**. Bulk listing management, order and tracking sync, and SEO
 analysis — running locally, on your own machine, against your own Etsy app.
@@ -122,9 +127,23 @@ etsykit --version
 ## First run
 
 ```bash
-cp .env.example .env
-# open .env and paste your keystring into ETSY_KEYSTRING
+etsykit init
 ```
+
+It asks for your keystring, your shared secret and your callback URL, writes a `.env`
+with `0600` permissions, and checks the credential against Etsy before you go further.
+**The shared secret is typed hidden** — it does not appear on screen or in your shell
+history. Nothing is sent anywhere except Etsy.
+
+```
+Keystring: abc123def456ghi789jkl012
+Shared secret:
+Redirect URI (must match a callback registered on your app) [http://localhost:3003/oauth/redirect]:
+✓ Wrote .env (keystring abc123…, shared secret 10 chars)
+✓ Etsy accepted the credential.
+```
+
+Prefer to write the file yourself? `cp .env.example .env` and fill in the three values.
 
 Verify your setup before trusting it with anything bulk:
 
@@ -369,6 +388,7 @@ does not convert, and Etsy weights conversion heavily.
 
 | Command | What it does |
 |---|---|
+| `etsykit init` | Write `.env` interactively and verify the credential |
 | `etsykit doctor` | Check config, key and connectivity |
 | `etsykit auth login` | OAuth consent flow (PKCE) |
 | `etsykit auth status` | Token, scopes, shop, remaining daily quota |
@@ -463,9 +483,18 @@ something other than UTF-8. Re-export as UTF-8 CSV; etsykit always writes UTF-8 
 
 ## Contributing
 
-Issues and pull requests welcome. Useful directions: inventory and variations
-(`updateListingInventory`), digital downloads, shop section management, listing
-translations, and a scheduled-renewal helper.
+Issues and pull requests welcome — see **[CONTRIBUTING.md](CONTRIBUTING.md)** for setup,
+the rules that matter, and where help would go furthest. You need no Etsy account and no
+network connection to contribute: the whole test suite is offline by design.
+
+Useful directions: inventory and variations (`updateListingInventory`), digital
+downloads, shop section management, listing translations, and a renewal helper.
+
+- **[SECURITY.md](SECURITY.md)** — what etsykit stores, where, and how to report a
+  vulnerability privately
+- **[CHANGELOG.md](CHANGELOG.md)** — release history, including the Etsy API gotchas
+  this project had to establish the hard way
+- **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)**
 
 Please keep the no-scraping rule: official API endpoints only.
 
