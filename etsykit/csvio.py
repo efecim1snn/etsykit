@@ -77,27 +77,47 @@ def split_multi(value: str) -> list[str]:
     return [part.strip() for part in raw if part.strip()]
 
 
-def as_int(value: str, field: str, *, required: bool = False) -> int | None:
+def as_int(
+    value: str, field: str, *, required: bool = False, minimum: int | None = None
+) -> int | None:
+    """Parse a whole number.
+
+    A fractional value is an error, not something to round. `quantity=3.9` used to
+    become 3 silently, which is a stock level the seller never typed.
+    """
     if not value:
         if required:
             raise ValidationError(f"{field} is required")
         return None
     try:
-        return int(float(value))
+        number = float(value)
     except ValueError as exc:
         raise ValidationError(f"{field} must be a whole number, got {value!r}") from exc
+    if number != int(number):
+        raise ValidationError(f"{field} must be a whole number, got {value!r}")
+    result = int(number)
+    if minimum is not None and result < minimum:
+        raise ValidationError(f"{field} must be {minimum} or more, got {result}")
+    return result
 
 
-def as_float(value: str, field: str, *, required: bool = False) -> float | None:
+def as_float(
+    value: str, field: str, *, required: bool = False, minimum: float | None = None
+) -> float | None:
     if not value:
         if required:
             raise ValidationError(f"{field} is required")
         return None
     # Accept '19,90' from locales that use a decimal comma.
     try:
-        return float(value.replace(",", ".") if value.count(",") == 1 and "." not in value else value)
+        number = float(
+            value.replace(",", ".") if value.count(",") == 1 and "." not in value else value
+        )
     except ValueError as exc:
         raise ValidationError(f"{field} must be a number, got {value!r}") from exc
+    if minimum is not None and number < minimum:
+        raise ValidationError(f"{field} must be {minimum} or more, got {number}")
+    return number
 
 
 def as_bool(value: str, field: str) -> bool | None:

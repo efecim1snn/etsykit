@@ -135,7 +135,12 @@ def audit_listing(listing: dict[str, Any]) -> Audit:
     if not tags:
         add(Issue("tags.missing", "error", "no tags — Etsy gives you 13 free query slots"))
     else:
-        if len(tags) < MAX_TAGS:
+        if len(tags) > MAX_TAGS:
+            # The listing validator has always enforced this; the audit did not, so a
+            # listing carrying more tags than Etsy allows could score a clean 100.
+            add(Issue("tags.too_many", "error",
+                      f"{len(tags)} tags — Etsy allows {MAX_TAGS}, the rest are ignored"))
+        elif len(tags) < MAX_TAGS:
             add(Issue("tags.unused", "warn",
                       f"{len(tags)}/{MAX_TAGS} tags used — {MAX_TAGS - len(tags)} slot(s) left on the table"))
 
@@ -275,17 +280,25 @@ def research(
     favorers: list[int] = []
 
     for listing in listings:
-        for tag in listing.get("tags") or []:
-            cleaned = str(tag).strip().lower()
-            if cleaned:
-                tag_counter[cleaned] += 1
+        # Count DISTINCT LISTINGS, not occurrences. These numbers are shown as
+        # "appears in 41 of 200 listings", so a single title reading
+        # "ceramic mug ceramic mug" must contribute 1 to `ceramic mug`, not 2 —
+        # otherwise the share can exceed 100% and the label is simply untrue.
+        seen_tags = {
+            cleaned
+            for tag in (listing.get("tags") or [])
+            if (cleaned := str(tag).strip().lower())
+        }
+        tag_counter.update(seen_tags)
 
         tokens = words(listing.get("title") or "")
+        seen_phrases: set[str] = set()
         for size in (1, 2, 3):
             for gram in ngrams(tokens, size):
                 if size == 1 and (gram in STOPWORDS or len(gram) < 3):
                     continue
-                phrase_counter[gram] += 1
+                seen_phrases.add(gram)
+        phrase_counter.update(seen_phrases)
 
         price, code = _price(listing)
         if price is not None:
@@ -338,14 +351,42 @@ def research(
     )
 
 
-def suggest_tags(report: MarketReport, *, existing: Sequence[str] = ()) -> list[str]:
-    """Tags common in the ranking set that this listing does not use yet."""
-    have = {t.lower().strip() for t in existing}
-    out = []
-    for tag, _count in report.tags:
-        if tag in have or len(tag) > MAX_TAG_LEN:
-            continue
-        out.append(tag)
-        if len(out) >= MAX_TAGS:
-            break
-    return out
+@dataclass
+class TagSuggestions:
+    add_now: list[str]
+    """Fits in the free slots — can be added without removing anything."""
+
+    needs_a_swap: list[str]
+    """Also common in this market, but only fits if an existing tag is dropped."""
+
+    free_slots: int
+    used_slots: int
+
+    def __iter__(self):
+        return iter(self.add_now)
+
+    def __len__(self) -> int:
+        return len(self.add_now)
+
+
+def suggest_tags(
+    report: MarketReport, *, existing: Sequence[str] = (), extra: int = 5
+) -> TagSuggestions:
+    """Tags common in the ranking set that this listing does not use yet.
+
+    Split by whether they actually fit. Offering 13 suggestions to a listing with 12
+    tags implies you can add 13 more; Etsy's ceiling is 13 in total, so only one
+    would land. The rest are a genuine option, but only as a swap — say which.
+    """
+    have = {t.lower().strip() for t in existing if str(t).strip()}
+    free = max(0, MAX_TAGS - len(have))
+
+    candidates = [
+        tag for tag, _count in report.tags if tag not in have and len(tag) <= MAX_TAG_LEN
+    ]
+    return TagSuggestions(
+        add_now=candidates[:free],
+        needs_a_swap=candidates[free : free + extra],
+        free_slots=free,
+        used_slots=len(have),
+    )

@@ -495,6 +495,12 @@ def listings_push(
     src: Path = typer.Argument(..., help="CSV to read. Empty listing_id creates, filled updates."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Validate everything, send nothing."),
     no_images: bool = typer.Option(False, "--no-images", help="Skip image uploads."),
+    partial: bool = typer.Option(
+        False,
+        "--partial",
+        help="Push the valid rows even when others fail validation. Off by default: "
+        "a half-pushed file leaves drafts you never meant to create.",
+    ),
     out: Optional[Path] = typer.Option(
         None, "--out", "-o", help="Write results (with new listing_ids) to this CSV."
     ),
@@ -528,6 +534,7 @@ def listings_push(
         "base_dir": src.resolve().parent,
         "dry_run": dry_run,
         "upload_images": not no_images,
+        "allow_partial": partial,
         "on_progress": _print_row_result,
     }
     if dry_run:
@@ -541,11 +548,18 @@ def listings_push(
     if dry_run:
         valid = sum(1 for r in report.results if not r.failed)
         _ok(f"Dry run: {valid} row(s) valid, {report.errors} with problems. Nothing was sent.")
+    elif report.aborted:
+        _fail(report.aborted_reason)
     else:
         _ok(
             f"Created {report.created}, updated {report.updated}, "
             f"uploaded {report.images} image(s), {report.errors} error(s)."
         )
+        if report.partial:
+            _warn(
+                f"{report.partial} listing(s) were created but did not get all their "
+                "images. They exist in your shop — see the rows marked 'partial' above."
+            )
         if report.created:
             console.print("[dim]New listings are drafts — publish them from your Etsy dashboard.[/]")
 
@@ -575,6 +589,12 @@ def listings_push(
 def _print_row_result(result: listings_mod.RowResult) -> None:
     if result.failed:
         err_console.print(f"[red]{CROSS} row {result.row}[/] {result.title} — {result.message}")
+    elif result.status == "partial":
+        console.print(
+            f"[yellow]! row {result.row}[/] {result.title} — {result.message}"
+        )
+    elif result.status == "skipped":
+        console.print(f"[dim]{BULLET} row {result.row}[/] skipped — {result.message}")
     elif result.status == "dry-run":
         console.print(
             f"[dim]{BULLET} row {result.row}[/] {result.action}: {result.title} ({result.message})"
@@ -827,7 +847,10 @@ def seo_keywords(
         lines.append(f"Median favourites: {report.median_favorers:.0f}")
     console.print(Panel("\n".join(lines), border_style="cyan"))
 
-    tags_table = Table(title="Tags used by ranking listings", title_justify="left")
+    tags_table = Table(
+        title=f"Tags used by ranking listings (of {report.sampled} sampled)",
+        title_justify="left",
+    )
     tags_table.add_column("tag", style="cyan")
     tags_table.add_column("listings", justify="right")
     tags_table.add_column("share", justify="right")
@@ -908,18 +931,42 @@ def seo_suggest(
         _warn(f"No market data for {term!r}.")
         return
 
-    missing = seo_mod.suggest_tags(report, existing=listing.get("tags") or [])
-    if missing:
-        console.print(f"\n[bold]Tags used by listings ranking for {term!r} that you do not use:[/]")
-        for tag in missing:
-            share = next((c for t, c in report.tags if t == tag), 0) / report.sampled
-            console.print(f"  [cyan]{tag}[/] [dim]({share:.0%} of ranking listings)[/]")
-        console.print(
-            "\n[dim]Judgement still required: only add tags that genuinely describe your item. "
-            "Irrelevant tags hurt conversion, which Etsy weights heavily.[/]"
+    suggestions = seo_mod.suggest_tags(report, existing=listing.get("tags") or [])
+
+    def _line(tag: str) -> str:
+        count = next((c for t, c in report.tags if t == tag), 0)
+        return (
+            f"  [cyan]{tag}[/] [dim](in {count} of the {report.sampled} listings sampled, "
+            f"{count / report.sampled:.0%})[/]"
         )
+
+    if suggestions.add_now:
+        console.print(
+            f"\n[bold]You have {suggestions.free_slots} free tag slot(s). "
+            f"Common in this market and unused by you:[/]"
+        )
+        for tag in suggestions.add_now:
+            console.print(_line(tag))
+    elif suggestions.used_slots >= 13:
+        _warn("All 13 tag slots are full — anything below would mean dropping one first.")
     else:
         _ok("Your tags already cover the common ones in this market.")
+
+    if suggestions.needs_a_swap:
+        console.print(
+            f"\n[bold]Also common, but only if you drop an existing tag "
+            f"({suggestions.used_slots}/13 used):[/]"
+        )
+        for tag in suggestions.needs_a_swap:
+            console.print(_line(tag))
+
+    if suggestions.add_now or suggestions.needs_a_swap:
+        console.print(
+            "\n[dim]These are usage shares among listings Etsy returned for this term — "
+            "not search volume, and not demand. Only add tags that genuinely describe "
+            "your item; irrelevant tags pull in traffic that does not convert, and Etsy "
+            "weights conversion heavily.[/]"
+        )
 
 
 def main() -> None:

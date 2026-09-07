@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+From an external offline code review (7 September 2026) that ran the tool against mock
+transports and observed sixteen behaviours. Nine were defects:
+
+- **Keyword shares were counted wrong.** Tag and title-phrase counts were per
+  *occurrence*, not per *listing*, while the interface labelled them "appears in N of M
+  listings". A title reading "ceramic mug ceramic mug" counted twice, so a share could
+  exceed 100%. Now counted per distinct listing, which is what the label always claimed.
+- **`listings push` wrote row by row without validating the file first.** Row 1 could
+  become a real draft before row 40 failed validation, leaving a shop half-populated
+  from a file the seller would never have pushed. The whole file is now validated
+  first; `--partial` opts back into the old behaviour.
+- **A created draft could be reported as nothing at all.** When the listing was created
+  and an image upload then failed, the row was marked an error and the created count
+  stayed at zero — while the draft sat in the shop. Now reported as `partial`, with the
+  listing id and an explicit note that it exists.
+- **`quantity=3.9` silently became 3.** Fractional values are now rejected.
+- **Negative and zero values passed local validation.** `price=-5`, `price=0` and
+  `quantity=-3` reached Etsy to be refused there. Lower bounds are enforced locally.
+- **`--no-images` still failed rows for missing image files** it was never going to upload.
+- **The SEO audit ignored more than 13 tags**, so an over-limit listing could score 100
+  even though the listing validator has always rejected it.
+- **Tag suggestions were not capped by free slots.** A listing with 12 tags was offered
+  13 additions; only one can fit. Suggestions are now split into what fits and what
+  would need a swap.
+- **Update rows dropped fields silently.** Editing `price` in a CSV and pushing an
+  update reported success and changed nothing. Ignored fields are now named.
+
 ## [0.1.0] — 2026-09-07
 
 First public release.

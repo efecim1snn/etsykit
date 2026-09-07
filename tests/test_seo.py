@@ -96,4 +96,4 @@ def test_suggest_tags_excludes_what_you_already_have():
         phrases=[], price_min=None, price_median=None, price_max=None,
         currency="USD", median_favorers=None, top_listings=[],
     )
-    assert suggest_tags(report, existing=["Ceramic Mug"]) == ["coffee gift", "stoneware"]
+    assert suggest_tags(report, existing=["Ceramic Mug"]).add_now == ["coffee gift", "stoneware"]

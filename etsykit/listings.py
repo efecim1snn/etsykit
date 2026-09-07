@@ -93,20 +93,43 @@ class RowResult:
 
     @property
     def failed(self) -> bool:
+        """Only 'error' is a failure.
+
+        'partial' means the listing was created and an image upload failed after it,
+        so the row wrote something real and must not be counted as nothing happening.
+        """
         return self.status == "error"
+
+    @property
+    def wrote(self) -> bool:
+        return self.status in WROTE_STATUSES
+
+
+# Statuses where a request actually reached Etsy and changed something.
+WROTE_STATUSES = frozenset({"ok", "partial"})
 
 
 @dataclass
 class PushReport:
     results: list[RowResult] = field(default_factory=list)
+    aborted: bool = False
+    aborted_reason: str = ""
 
     @property
     def created(self) -> int:
-        return sum(1 for r in self.results if r.action == "create" and not r.failed)
+        return sum(1 for r in self.results if r.action == "create" and r.wrote)
 
     @property
     def updated(self) -> int:
-        return sum(1 for r in self.results if r.action == "update" and not r.failed)
+        return sum(1 for r in self.results if r.action == "update" and r.wrote)
+
+    @property
+    def partial(self) -> int:
+        return sum(1 for r in self.results if r.status == "partial")
+
+    @property
+    def skipped(self) -> int:
+        return sum(1 for r in self.results if r.status == "skipped")
 
     @property
     def errors(self) -> int:
@@ -172,23 +195,31 @@ def build_payload(
         listing_type = "physical"
         payload["type"] = listing_type
 
-    for name, caster, required in (
-        ("price", as_float, not is_update),
-        ("quantity", as_int, not is_update),
-        ("taxonomy_id", as_int, not is_update),
+    # Lower bounds matter: a negative price or a negative stock level is nonsense
+    # Etsy would reject anyway, and the whole point of validating here is that the
+    # seller learns it before the request instead of after it.
+    try:
+        price = as_float(row.get("price", ""), "price", required=not is_update, minimum=0)
+    except ValidationError as exc:
+        price = None
+        problems.append(str(exc))
+    if price is not None:
+        if price <= 0:
+            problems.append("price must be greater than 0")
+        else:
+            payload["price"] = price
+
+    for name, minimum, required in (
+        ("quantity", 0, not is_update),
+        ("taxonomy_id", 1, not is_update),
+        ("shipping_profile_id", 1, False),
+        ("return_policy_id", 1, False),
+        ("shop_section_id", 1, False),
+        ("processing_min", 0, False),
+        ("processing_max", 0, False),
     ):
         try:
-            value = caster(row.get(name, ""), name, required=required)
-        except ValidationError as exc:
-            problems.append(str(exc))
-            continue
-        if value is not None:
-            payload[name] = value
-
-    for name in ("shipping_profile_id", "return_policy_id", "shop_section_id",
-                 "processing_min", "processing_max"):
-        try:
-            value = as_int(row.get(name, ""), name)
+            value = as_int(row.get(name, ""), name, required=required, minimum=minimum)
         except ValidationError as exc:
             problems.append(str(exc))
             continue
@@ -197,7 +228,7 @@ def build_payload(
 
     for name in ("item_weight", "item_length", "item_width", "item_height"):
         try:
-            value = as_float(row.get(name, ""), name)
+            value = as_float(row.get(name, ""), name, minimum=0)
         except ValidationError as exc:
             problems.append(str(exc))
             continue
@@ -283,13 +314,84 @@ def build_payload(
         )
 
     if is_update:
+        # Etsy's updateListing accepts a narrower set of fields than createDraftListing,
+        # and price/quantity are held back on purpose. Dropping them silently means a
+        # seller edits a price in their spreadsheet, pushes, sees "updated", and finds
+        # nothing changed — so say which fields are going nowhere.
+        ignored = sorted(k for k in payload if k not in UPDATABLE)
         payload = {k: v for k, v in payload.items() if k in UPDATABLE}
+        if ignored and warnings is not None:
+            warnings.append(
+                f"not sent on an update, so unchanged: {', '.join(ignored)}"
+                + (
+                    " — price and quantity live in Etsy's inventory endpoint and are "
+                    "held back so they cannot flatten variation pricing"
+                    if {"price", "quantity"} & set(ignored)
+                    else ""
+                )
+            )
         if not payload:
             problems.append("no updatable fields present in this row")
 
     if problems:
         raise ValidationError("; ".join(problems))
     return payload
+
+
+@dataclass
+class PreparedRow:
+    """One CSV row, validated locally and ready to send — or already known bad."""
+
+    result: RowResult
+    is_update: bool = False
+    payload: dict[str, Any] = field(default_factory=dict)
+    image_paths: list[Path] = field(default_factory=list)
+
+
+def prepare(
+    rows: Sequence[dict[str, str]], *, base_dir: Path, upload_images: bool = True
+) -> list[PreparedRow]:
+    """Validate every row. Pure local work — no network, no writes, no side effects."""
+    prepared: list[PreparedRow] = []
+
+    for index, row in enumerate(rows, start=2):  # row 1 is the header
+        result = RowResult(row=index, title=row.get("title", "")[:60])
+
+        try:
+            listing_id = as_int(row.get("listing_id", ""), "listing_id", minimum=1)
+        except ValidationError as exc:
+            result.status = "error"
+            result.message = str(exc)
+            prepared.append(PreparedRow(result))
+            continue
+
+        result.listing_id = listing_id
+        is_update = listing_id is not None
+        result.action = "update" if is_update else "create"
+
+        try:
+            payload = build_payload(row, is_update=is_update, warnings=result.warnings)
+        except ValidationError as exc:
+            result.status = "error"
+            result.message = str(exc)
+            prepared.append(PreparedRow(result, is_update))
+            continue
+
+        image_paths = resolve_paths(split_multi(row.get("images", "")), base_dir)
+        # Only the run that will actually upload them cares whether they exist.
+        if upload_images:
+            missing = [p for p in image_paths if not p.is_file()]
+            if missing:
+                result.status = "error"
+                result.message = f"image not found: {', '.join(str(p) for p in missing[:3])}"
+                prepared.append(PreparedRow(result, is_update, payload, image_paths))
+                continue
+        else:
+            image_paths = []
+
+        prepared.append(PreparedRow(result, is_update, payload, image_paths))
+
+    return prepared
 
 
 def push(
@@ -299,89 +401,104 @@ def push(
     base_dir: Path,
     dry_run: bool = False,
     upload_images: bool = True,
+    allow_partial: bool = False,
     on_progress: Callable[[RowResult], None] | None = None,
 ) -> PushReport:
-    """Apply a CSV to the shop. `client` may be None when dry_run is set — validation
-    is entirely local, so a seller still waiting on API approval can check their file."""
+    """Apply a CSV to the shop.
+
+    The whole file is validated before anything is sent. If any row is bad the run
+    stops with nothing written, because the alternative — discovering row 40 is
+    invalid after rows 1-39 became real drafts — leaves a shop half-populated from a
+    file the seller would never have pushed. `allow_partial` opts back into
+    row-by-row behaviour.
+
+    `client` may be None when dry_run is set: validation is entirely local, so a
+    seller still waiting on API approval can check their file.
+    """
     if client is None and not dry_run:
         raise ValidationError("A client is required unless dry_run is set.")
 
     report = PushReport()
+    prepared = prepare(rows, base_dir=base_dir, upload_images=upload_images)
+    invalid = [p for p in prepared if p.result.failed]
 
-    for index, row in enumerate(rows, start=2):  # row 1 is the header
-        listing_id = None
-        try:
-            listing_id = as_int(row.get("listing_id", ""), "listing_id")
-        except ValidationError as exc:
-            result = RowResult(row=index, status="error", message=str(exc), title=row.get("title", ""))
-            report.results.append(result)
-            if on_progress:
-                on_progress(result)
-            continue
+    if dry_run:
+        for item in prepared:
+            if not item.result.failed:
+                item.result.status = "dry-run"
+                item.result.message = (
+                    f"{len(item.payload)} fields, {len(item.image_paths)} image(s)"
+                )
+            _emit(report, item.result, on_progress)
+        return report
 
-        is_update = listing_id is not None
-        result = RowResult(
-            row=index,
-            action="update" if is_update else "create",
-            listing_id=listing_id,
-            title=row.get("title", "")[:60],
+    if invalid and not allow_partial:
+        report.aborted = True
+        report.aborted_reason = (
+            f"{len(invalid)} of {len(prepared)} row(s) failed validation. "
+            "Nothing was sent. Fix them, or re-run with --partial to push the valid rows."
         )
+        for item in prepared:
+            if not item.result.failed:
+                item.result.status = "skipped"
+                item.result.message = "not sent — another row in this file is invalid"
+            _emit(report, item.result, on_progress)
+        return report
 
-        try:
-            payload = build_payload(row, is_update=is_update, warnings=result.warnings)
-        except ValidationError as exc:
-            result.status = "error"
-            result.message = str(exc)
-            report.results.append(result)
-            if on_progress:
-                on_progress(result)
-            continue
-
-        image_paths = resolve_paths(split_multi(row.get("images", "")), base_dir)
-        missing = [p for p in image_paths if not p.is_file()]
-        if missing:
-            result.status = "error"
-            result.message = f"image not found: {', '.join(str(p) for p in missing[:3])}"
-            report.results.append(result)
-            if on_progress:
-                on_progress(result)
-            continue
-
-        if dry_run:
-            result.status = "dry-run"
-            result.message = f"{len(payload)} fields, {len(image_paths)} image(s)"
-            report.results.append(result)
-            if on_progress:
-                on_progress(result)
-            continue
-
-        try:
-            if is_update:
-                client.update_listing(listing_id, payload)  # type: ignore[arg-type]
-            else:
-                created = client.create_draft_listing(payload)
-                result.listing_id = int(created["listing_id"])
-                listing_id = result.listing_id
-
-            if upload_images and image_paths and listing_id:
-                for rank, image in enumerate(image_paths, start=1):
-                    client.upload_listing_image(listing_id, image, rank=rank)
-                    result.images_uploaded += 1
-
-            result.message = "created as draft" if not is_update else "updated"
-        except EtsyApiError as exc:
-            result.status = "error"
-            hint = exc.hint()
-            result.message = f"{exc.message}{' — ' + hint if hint else ''}"
-        except (OSError, KeyError, ValueError) as exc:
-            result.status = "error"
-            result.message = str(exc)
-
-        report.results.append(result)
-        if on_progress:
-            on_progress(result)
+    for item in prepared:
+        if not item.result.failed:
+            _write_row(client, item, upload_images=upload_images)  # type: ignore[arg-type]
+        _emit(report, item.result, on_progress)
 
     return report
+
+
+def _emit(
+    report: PushReport, result: RowResult, on_progress: Callable[[RowResult], None] | None
+) -> None:
+    report.results.append(result)
+    if on_progress:
+        on_progress(result)
+
+
+def _write_row(client: EtsyClient, item: PreparedRow, *, upload_images: bool) -> None:
+    result = item.result
+    try:
+        if item.is_update:
+            client.update_listing(result.listing_id, item.payload)  # type: ignore[arg-type]
+            result.message = "updated"
+        else:
+            created = client.create_draft_listing(item.payload)
+            result.listing_id = int(created["listing_id"])
+            result.message = "created as draft"
+    except EtsyApiError as exc:
+        result.status = "error"
+        hint = exc.hint()
+        result.message = f"{exc.message}{' — ' + hint if hint else ''}"
+        return
+    except (OSError, KeyError, ValueError) as exc:
+        result.status = "error"
+        result.message = str(exc)
+        return
+
+    if not (upload_images and item.image_paths and result.listing_id):
+        return
+
+    for rank, image in enumerate(item.image_paths, start=1):
+        try:
+            client.upload_listing_image(result.listing_id, image, rank=rank)
+            result.images_uploaded += 1
+        except (EtsyApiError, OSError, ValueError) as exc:
+            # The listing already exists. Reporting a plain "error" would send the
+            # seller hunting for a draft they already have — and etsykit holds no
+            # delete scope on purpose, so there is nothing to roll back to.
+            result.status = "partial"
+            result.message = (
+                f"{result.message} (id {result.listing_id}), but image {rank} of "
+                f"{len(item.image_paths)} failed: {exc}. The listing IS in your shop — "
+                "add the remaining images in Etsy, or fix and re-run just this row."
+            )
+            return
 
 
 def pull(client: EtsyClient, *, state: str = "active", max_items: int | None = None) -> list[dict[str, Any]]:

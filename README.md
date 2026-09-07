@@ -280,7 +280,14 @@ it from your Etsy dashboard — so a mistake in a 300-row CSV is recoverable.
 `results.csv` contains the new `listing_id` for every created row; paste that column
 back into your source CSV and subsequent pushes become updates.
 
-Rows are independent: a bad row is reported and skipped, the rest continue.
+**The whole file is validated before anything is sent.** If any row fails, the run stops
+with nothing written — because discovering that row 40 is invalid *after* rows 1–39 became
+real drafts leaves your shop half-populated from a file you would never have pushed.
+Fix the reported rows and run again, or pass `--partial` to push the valid ones anyway.
+
+If a listing is created but one of its images fails to upload, the row is reported as
+**`partial`**, not as an error: the draft exists in your shop and you need to know about
+it. etsykit holds no delete scope, so it cannot undo the create — it tells you instead.
 
 ### Round-tripping existing listings
 
@@ -436,10 +443,16 @@ retried — they are reported with a hint about the likely cause.
 **Token refresh.** Handled transparently, including a re-refresh if a token expires
 mid-batch.
 
-**Failure isolation.** In a bulk run each row succeeds or fails on its own. You get a
-per-row report and a non-zero exit code if anything failed. For cron or CI, pass
-`--yes` (`-y`) to `listings push` and `orders ship` — without it they stop at an
-interactive confirmation and a scheduled job would hang.
+**All-or-nothing by default.** `listings push` validates every row before it sends
+anything. One bad row stops the run with nothing written; `--partial` opts back into
+row-by-row. You get a per-row report and a non-zero exit code if anything failed. For
+cron or CI, pass `--yes` (`-y`) to `listings push` and `orders ship` — without it they
+stop at an interactive confirmation and a scheduled job would hang.
+
+**Local validation is strict about numbers.** A negative price, a zero price, a negative
+quantity or a fractional `quantity` like `3.9` are all rejected here rather than rounded
+or forwarded. On an update, fields Etsy's `updateListing` does not accept — `price` and
+`quantity` among them — are reported as ignored instead of silently dropped.
 
 **Encoding.** CSVs are read and written as UTF-8 with BOM so Excel on Windows does not
 mangle `ç`, `ğ`, `ü`, `é` or `ß`. Prices accept a decimal comma.
