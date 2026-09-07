@@ -309,6 +309,11 @@ etsykit orders pull --unshipped -o to-ship.csv
 One row per order, with line items collapsed into a readable cell and the shipping
 address split into its own columns.
 
+> ⚠️ **This file contains your customers' personal data** — names, email addresses,
+> postal addresses and gift messages. Do not commit it, paste it into an issue, or share
+> it. `.gitignore` covers `*.csv` for exactly this reason, but a file you move elsewhere
+> is no longer protected.
+
 ### Uploading tracking
 
 Add `tracking_code` and `carrier_name` columns (the exported file already has
@@ -420,16 +425,21 @@ applies to apps granted commercial access. etsykit defaults to **4/second** so i
 on the personal tier; raise it with `ETSYKIT_RATE_PER_SEC` if your app is allowed more.
 `auth status` shows the remaining daily quota.
 
-**Retries.** `429` and `5xx` are retried up to 5 times with exponential backoff and
-jitter, honouring `Retry-After`. `4xx` errors are not retried — they are reported with
-a hint about the likely cause.
+**Retries.** `429` is retried on any request — it means Etsy refused, not that it acted.
+`5xx` and network errors are retried **only on reads**. Etsy has no idempotency key, so a
+write that may have landed is never repeated: a retried `POST` would mean a duplicate
+draft, or a second "your order shipped" email to the same buyer. Those are reported
+instead, with a warning that the request may have been accepted. Up to 5 attempts,
+exponential backoff with jitter, honouring `Retry-After`. Other `4xx` errors are not
+retried — they are reported with a hint about the likely cause.
 
 **Token refresh.** Handled transparently, including a re-refresh if a token expires
 mid-batch.
 
 **Failure isolation.** In a bulk run each row succeeds or fails on its own. You get a
-per-row report and a non-zero exit code if anything failed, which makes it safe in a
-cron job or CI.
+per-row report and a non-zero exit code if anything failed. For cron or CI, pass
+`--yes` (`-y`) to `listings push` and `orders ship` — without it they stop at an
+interactive confirmation and a scheduled job would hang.
 
 **Encoding.** CSVs are read and written as UTF-8 with BOM so Excel on Windows does not
 mangle `ç`, `ğ`, `ü`, `é` or `ß`. Prices accept a decimal comma.

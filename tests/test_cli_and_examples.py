@@ -4,8 +4,10 @@ Both were found only by running the tool on a real Windows machine, not by the u
 suite, so they get explicit tests here.
 """
 
+from fnmatch import fnmatch
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from etsykit import cli
@@ -13,6 +15,7 @@ from etsykit.cli import app
 from etsykit.config import split_credential, write_env_file
 from etsykit.csvio import read_rows
 from etsykit.listings import LISTING_COLUMNS, build_payload
+from etsykit.orders import ORDER_COLUMNS
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -89,6 +92,47 @@ def test_status_markers_are_encodable_by_the_current_stdout():
     encoding = getattr(cli.sys.stdout, "encoding", None) or "utf-8"
     for marker in (cli.TICK, cli.CROSS, cli.BULLET):
         marker.encode(encoding)
+
+
+# --- exports must not be committable -------------------------------------------
+
+
+def _gitignore_patterns():
+    lines = (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()
+    return [ln.strip() for ln in lines if ln.strip() and not ln.startswith("#")]
+
+
+def test_orders_export_carries_personal_data():
+    # This is the reason the CSV rule below exists. If these columns ever go away,
+    # the guard can be relaxed — until then it must hold.
+    for column in ("buyer_name", "buyer_email", "ship_address", "ship_zip"):
+        assert column in ORDER_COLUMNS
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "orders.csv",           # `orders pull` default
+        "listings.csv",         # `listings template` default
+        "listings-export.csv",  # `listings pull` default
+        "results.csv",          # `listings push --out` in the README
+        "seo-report.csv",       # `seo audit --out` in the README
+        "to-ship.csv",          # README example
+        "musteri-listesi.csv",  # anything a seller names themselves
+    ],
+)
+def test_every_export_filename_is_gitignored(filename):
+    # The README tells people to clone the repo and run commands inside it, so an
+    # un-ignored export is one `git add .` away from publishing a customer list.
+    patterns = _gitignore_patterns()
+    assert any(fnmatch(filename, p) for p in patterns if not p.startswith("!"))
+
+
+def test_the_shipped_examples_are_still_tracked():
+    patterns = _gitignore_patterns()
+    negations = [p[1:] for p in patterns if p.startswith("!")]
+    for example in ("examples/listings.csv", "examples/tracking.csv"):
+        assert any(fnmatch(example, n) for n in negations), f"{example} would be ignored"
 
 
 # --- `etsykit init` -------------------------------------------------------------

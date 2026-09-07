@@ -55,7 +55,10 @@ class EtsyApiError(EtsyKitError):
         if self.status == 404:
             return "Not found. Verify the shop_id / listing_id / receipt_id."
         if self.status == 429:
-            return "Rate limited. etsykit throttles automatically; lower --rate if this persists."
+            return (
+                "Rate limited. etsykit throttles automatically; lower it with "
+                "ETSYKIT_RATE_PER_SEC (default 4) if this persists."
+            )
         if self.status >= 500:
             return "Etsy-side error. Safe to retry in a few minutes."
         if self.status == 400:
