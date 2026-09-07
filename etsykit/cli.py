@@ -1,0 +1,941 @@
+"""Command line interface."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any, Optional
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+
+from . import __version__, auth, csvio
+from . import listings as listings_mod
+from . import orders as orders_mod
+from . import seo as seo_mod
+from .client import EtsyClient
+from .config import Config, split_credential, token_path, write_env_file
+from .errors import AuthError, EtsyKitError
+
+
+def _force_utf8(stream: Any) -> None:
+    """Make status markers survive redirection on Windows.
+
+    A Windows console renders Unicode fine, but the moment output is piped or
+    redirected Python falls back to the legacy ANSI code page — cp1252 on an English
+    install, cp1254 on a Turkish one. Neither can encode '✓', so every command that
+    printed a status marker died with UnicodeEncodeError as soon as you sent it to a
+    file. Reconfiguring to UTF-8 fixes redirection and changes nothing on a console.
+    """
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass  # Not a reconfigurable stream (pytest capture, an odd shell). _symbol covers it.
+
+
+def _symbol(preferred: str, fallback: str) -> str:
+    """Fall back to ASCII if the stream still cannot represent the glyph."""
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        preferred.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return fallback
+    return preferred
+
+
+_force_utf8(sys.stdout)
+_force_utf8(sys.stderr)
+
+TICK = _symbol("✓", "OK")
+CROSS = _symbol("✗", "X")
+BULLET = _symbol("·", "-")
+
+console = Console()
+err_console = Console(stderr=True)
+
+app = typer.Typer(
+    name="etsykit",
+    help="Etsy seller automation: bulk listings, order/tracking sync, and SEO analysis.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+auth_app = typer.Typer(help="Authorise etsykit against your Etsy account.", no_args_is_help=True)
+shop_app = typer.Typer(help="Shop metadata you need to fill in a listing CSV.", no_args_is_help=True)
+listings_app = typer.Typer(help="Export and bulk-create/update listings.", no_args_is_help=True)
+orders_app = typer.Typer(help="Export orders and upload tracking numbers.", no_args_is_help=True)
+seo_app = typer.Typer(help="Audit your listings and research the market.", no_args_is_help=True)
+
+app.add_typer(auth_app, name="auth")
+app.add_typer(shop_app, name="shop")
+app.add_typer(listings_app, name="listings")
+app.add_typer(orders_app, name="orders")
+app.add_typer(seo_app, name="seo")
+
+
+def _client(*, require_auth: bool = True) -> EtsyClient:
+    return EtsyClient(Config.load(), require_auth=require_auth)
+
+
+def _ok(msg: str) -> None:
+    console.print(f"[green]{TICK}[/] {msg}")
+
+
+def _warn(msg: str) -> None:
+    console.print(f"[yellow]![/] {msg}")
+
+
+def _fail(msg: str) -> None:
+    err_console.print(f"[red]{CROSS}[/] {msg}")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(f"etsykit {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        help="Print the version and exit.",
+        # Eager, so it resolves while parsing — otherwise the app rejects
+        # `etsykit --version` for having no subcommand before we ever see the flag.
+        is_eager=True,
+        callback=_version_callback,
+    ),
+) -> None:
+    """etsykit — Etsy seller automation over the official Open API v3."""
+
+
+# ---------------------------------------------------------------- auth
+
+
+@auth_app.command("login")
+def auth_login(
+    no_browser: bool = typer.Option(False, "--no-browser", help="Print the URL instead of opening it."),
+    listen: Optional[int] = typer.Option(
+        None,
+        "--listen",
+        help="Force catching the redirect on this local port (e.g. behind a tunnel). "
+        "A localhost callback already does this automatically.",
+    ),
+    paste: bool = typer.Option(
+        False, "--paste", help="Force the manual flow: paste the redirected URL back in."
+    ),
+) -> None:
+    """Run the OAuth consent flow and store a token.
+
+    A localhost callback is caught automatically; any other host uses the paste flow.
+    """
+    config = Config.load()
+    auth.validate_redirect_uri(config.redirect_uri)
+    if listen and not auth.port_is_free(listen):
+        _warn(f"Something is already listening on port {listen}.")
+    token = auth.login(
+        config, open_browser=not no_browser, listen_port=listen, paste=paste
+    )
+    _ok(f"Authorised. Token saved to {token_path()}")
+    console.print(f"  scopes: {' '.join(token.scopes)}")
+    missing = token.missing_scopes(config.scopes)
+    if missing:
+        _warn(
+            f"Etsy granted fewer scopes than requested — missing: {' '.join(missing)}. "
+            "Commands needing those will fail with 403. Re-run `etsykit auth login` "
+            "and approve everything."
+        )
+    with EtsyClient(config, token=token) as client:
+        shop = client.shop()
+        console.print(f"  shop:   {shop.get('shop_name')} (id {shop.get('shop_id')})")
+
+
+@auth_app.command("status")
+def auth_status() -> None:
+    """Show whether a valid token is stored, and for which shop."""
+    config = Config.load(require_key=False)
+    token = auth.load_token()
+    if token is None:
+        _warn("Not authenticated. Run: etsykit auth login")
+        raise typer.Exit(1)
+
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    table.add_row("token file", str(token_path()))
+    table.add_row("user id", str(token.user_id or "unknown"))
+    table.add_row("scopes", " ".join(token.scopes) or "unknown")
+    table.add_row(
+        "expires in",
+        "[red]expired[/]" if token.expired else f"{token.seconds_left // 60} min",
+    )
+    if config.keystring:
+        with EtsyClient(config, token=token) as client:
+            shop = client.shop()
+            table.add_row("shop", f"{shop.get('shop_name')} (id {shop.get('shop_id')})")
+            table.add_row("active listings", str(shop.get("listing_active_count", "?")))
+            if client.quota_remaining is not None:
+                table.add_row("daily quota left", str(client.quota_remaining))
+    console.print(table)
+
+
+@auth_app.command("refresh")
+def auth_refresh() -> None:
+    """Force a token refresh."""
+    token = auth.load_token()
+    if token is None:
+        raise AuthError("Nothing to refresh. Run: etsykit auth login")
+    fresh = auth.refresh(token, Config.load())
+    _ok(f"Refreshed. Valid for another {fresh.seconds_left // 60} minutes.")
+
+
+@auth_app.command("logout")
+def auth_logout() -> None:
+    """Delete the stored token."""
+    if auth.clear_token():
+        _ok("Token deleted.")
+    else:
+        _warn("No token was stored.")
+
+
+@app.command("init")
+def init(
+    keystring: Optional[str] = typer.Option(None, "--keystring", help="Your app's keystring."),
+    redirect_uri: Optional[str] = typer.Option(
+        None, "--redirect-uri", help="A callback URL registered on your Etsy app."
+    ),
+    shop_id: Optional[int] = typer.Option(None, "--shop-id", help="Only if you own several shops."),
+    path: Path = typer.Option(Path(".env"), "--path", help="Where to write the file."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing .env."),
+    check: bool = typer.Option(True, "--check/--no-check", help="Verify the credential with Etsy."),
+) -> None:
+    """Write a .env interactively.
+
+    The shared secret is typed hidden, is never echoed, and goes straight into a
+    0600 file — it does not appear in your shell history or on screen.
+    """
+    if path.exists() and not force:
+        _warn(f"{path} already exists. Re-run with --force to overwrite it.")
+        raise typer.Exit(1)
+
+    console.print(
+        "Find both halves of your credential at "
+        "[cyan]https://www.etsy.com/developers/your-apps[/]\n"
+    )
+
+    keystring = keystring or typer.prompt("Keystring")
+    secret = typer.prompt("Shared secret", hide_input=True)
+    keystring, secret = split_credential(keystring, secret)
+    if not keystring or not secret:
+        _fail("Both the keystring and the shared secret are required.")
+        raise typer.Exit(1)
+
+    if not redirect_uri:
+        redirect_uri = typer.prompt(
+            "Redirect URI (must match a callback registered on your app)",
+            default="http://localhost:3003/oauth/redirect",
+        )
+    auth.validate_redirect_uri(redirect_uri)
+
+    values = {
+        "ETSY_KEYSTRING": keystring,
+        "ETSY_SHARED_SECRET": secret,
+        "ETSY_REDIRECT_URI": redirect_uri,
+    }
+    if shop_id:
+        values["ETSY_SHOP_ID"] = str(shop_id)
+    write_env_file(path, values)
+    _ok(f"Wrote {path} (keystring {keystring[:6]}…, shared secret {len(secret)} chars)")
+
+    if not check:
+        return
+
+    config = Config(keystring=keystring, shared_secret=secret, redirect_uri=redirect_uri)
+    with EtsyClient(config, require_auth=False) as client:
+        try:
+            client.ping()
+        except EtsyKitError as exc:
+            _fail(f"Etsy rejected the credential: {exc}")
+            err_console.print(
+                "[yellow]→[/] Check both halves on your app page. The keystring and the "
+                "shared secret are different values, and both must be exact."
+            )
+            raise typer.Exit(1) from exc
+    _ok("Etsy accepted the credential.")
+    console.print("\nNext: [cyan]etsykit auth login[/]")
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """Check configuration and connectivity before you trust a bulk run."""
+    problems = 0
+    try:
+        config = Config.load()
+        _ok(
+            f"App credentials found (keystring {config.keystring[:6]}…, "
+            f"shared secret {len(config.shared_secret)} chars)"
+        )
+    except EtsyKitError as exc:
+        _fail(str(exc))
+        raise typer.Exit(1) from exc
+
+    try:
+        auth.validate_redirect_uri(config.redirect_uri)
+        _ok(f"Redirect URI looks valid ({config.redirect_uri})")
+    except EtsyKitError as exc:
+        _fail(str(exc))
+        problems += 1
+
+    console.print(f"  rate limit:   {config.rate_per_sec:.0f} req/sec")
+
+    with EtsyClient(config, require_auth=False) as client:
+        try:
+            client.ping()
+            _ok("API reachable and keystring accepted")
+        except EtsyKitError as exc:
+            _fail(f"Ping failed: {exc}")
+            problems += 1
+
+    token = auth.load_token()
+    if token is None:
+        _warn("No token stored — only `seo keywords` will work. Run: etsykit auth login")
+    elif token.expired:
+        _warn("Token expired; it will refresh automatically on the next call.")
+    else:
+        _ok(f"Token valid for {token.seconds_left // 60} more minutes")
+
+    raise typer.Exit(1 if problems else 0)
+
+
+# ---------------------------------------------------------------- shop
+
+
+@shop_app.command("info")
+def shop_info() -> None:
+    """Print your shop's identifiers and headline numbers."""
+    with _client() as client:
+        shop = client.shop()
+    table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+    for label, key in [
+        ("shop name", "shop_name"),
+        ("shop id", "shop_id"),
+        ("url", "url"),
+        ("currency", "currency_code"),
+        ("country", "shop_location_country_iso"),
+        ("active listings", "listing_active_count"),
+        ("digital listings", "digital_listing_count"),
+        ("sales", "transaction_sold_count"),
+        ("reviews", "review_count"),
+        ("rating", "review_average"),
+        ("on vacation", "is_vacation"),
+    ]:
+        table.add_row(label, str(shop.get(key, "—")))
+    console.print(table)
+
+
+@shop_app.command("profiles")
+def shop_profiles() -> None:
+    """List shipping profiles, return policies and sections — the IDs your CSV needs."""
+    with _client() as client:
+        shipping = client.shipping_profiles()
+        policies = client.return_policies()
+        sections = client.shop_sections()
+
+    if shipping:
+        table = Table(title="Shipping profiles", title_justify="left")
+        table.add_column("shipping_profile_id", style="cyan")
+        table.add_column("title")
+        table.add_column("origin")
+        table.add_column("processing")
+        for profile in shipping:
+            table.add_row(
+                str(profile.get("shipping_profile_id")),
+                str(profile.get("title", "")),
+                str(profile.get("origin_country_iso", "")),
+                f"{profile.get('min_processing_days', '?')}–{profile.get('max_processing_days', '?')} days",
+            )
+        console.print(table)
+    else:
+        _warn(
+            "No shipping profiles yet. You can still stage drafts without one, "
+            "but you cannot publish a physical listing until you create one in Etsy."
+        )
+
+    if policies:
+        table = Table(title="Return policies", title_justify="left")
+        table.add_column("return_policy_id", style="cyan")
+        table.add_column("accepts returns")
+        table.add_column("accepts exchanges")
+        table.add_column("deadline (days)")
+        for policy in policies:
+            table.add_row(
+                str(policy.get("return_policy_id")),
+                str(policy.get("accepts_returns", "")),
+                str(policy.get("accepts_exchanges", "")),
+                str(policy.get("return_deadline", "—")),
+            )
+        console.print(table)
+
+    if sections:
+        table = Table(title="Shop sections", title_justify="left")
+        table.add_column("shop_section_id", style="cyan")
+        table.add_column("title")
+        table.add_column("listings")
+        for section in sections:
+            table.add_row(
+                str(section.get("shop_section_id")),
+                str(section.get("title", "")),
+                str(section.get("active_listing_count", "")),
+            )
+        console.print(table)
+
+
+@shop_app.command("taxonomy")
+def shop_taxonomy(
+    query: str = typer.Argument(..., help="Category text to search for, e.g. 'necklace'."),
+    limit: int = typer.Option(25, help="Maximum matches to show."),
+) -> None:
+    """Find the taxonomy_id for a category. Every new listing needs one."""
+    with _client(require_auth=False) as client:
+        nodes = client.taxonomy_nodes()
+
+    flat: list[tuple[int, str]] = []
+
+    def walk(items: list[dict[str, Any]], trail: list[str]) -> None:
+        for node in items:
+            path = trail + [str(node.get("name", ""))]
+            flat.append((int(node.get("id", 0)), " > ".join(path)))
+            walk(node.get("children") or [], path)
+
+    walk(nodes, [])
+    needle = query.lower()
+    matches = [(nid, path) for nid, path in flat if needle in path.lower()]
+    if not matches:
+        _warn(f"No category matched {query!r}. Try a broader word.")
+        raise typer.Exit(1)
+
+    # Prefer leaf categories: those are the ones Etsy accepts on a listing.
+    matches.sort(key=lambda m: (needle not in m[1].split(" > ")[-1].lower(), len(m[1])))
+    table = Table()
+    table.add_column("taxonomy_id", style="cyan")
+    table.add_column("category path")
+    for nid, path in matches[:limit]:
+        table.add_row(str(nid), path)
+    console.print(table)
+    console.print(f"[dim]{len(matches)} match(es); showing {min(limit, len(matches))}.[/]")
+
+
+# ---------------------------------------------------------------- listings
+
+
+@listings_app.command("template")
+def listings_template(
+    out: Path = typer.Option(Path("listings.csv"), "--out", "-o", help="Where to write the template."),
+) -> None:
+    """Write a starter CSV with the correct headers and one example row."""
+    example = {
+        "listing_id": "",
+        "title": "Handmade Ceramic Coffee Mug, Minimalist Stoneware Cup, Gift for Coffee Lover",
+        "description": "Wheel-thrown stoneware mug, glazed in matte cream.\n\nHolds 300ml. Dishwasher safe.",
+        "price": "24.00",
+        "quantity": "5",
+        "who_made": "i_did",
+        "when_made": "made_to_order",
+        "taxonomy_id": "1633",
+        "type": "physical",
+        "tags": "ceramic mug|stoneware cup|handmade pottery|coffee lover gift|minimalist mug",
+        "materials": "stoneware|glaze",
+        "shipping_profile_id": "",
+        "return_policy_id": "",
+        "shop_section_id": "",
+        "processing_min": "1",
+        "processing_max": "3",
+        "is_supply": "false",
+        "is_customizable": "false",
+        "is_taxable": "true",
+        "should_auto_renew": "true",
+        "item_weight": "450",
+        "item_weight_unit": "g",
+        "item_length": "",
+        "item_width": "",
+        "item_height": "",
+        "item_dimensions_unit": "",
+        "images": "photos/mug-1.jpg|photos/mug-2.jpg",
+        "state": "",
+    }
+    csvio.write_rows(out, [example], columns=listings_mod.LISTING_COLUMNS)
+    _ok(f"Template written to {out}")
+    console.print(
+        "  Fill [cyan]shipping_profile_id[/] from `etsykit shop profiles` and "
+        "[cyan]taxonomy_id[/] from `etsykit shop taxonomy <word>`.\n"
+        "  Multi-value cells use [cyan]|[/] as the separator. Image paths are relative to the CSV."
+    )
+
+
+@listings_app.command("pull")
+def listings_pull(
+    out: Path = typer.Option(Path("listings-export.csv"), "--out", "-o"),
+    state: str = typer.Option("active", help="active, inactive, draft, expired or sold_out."),
+    limit: Optional[int] = typer.Option(None, help="Stop after this many listings."),
+) -> None:
+    """Export your listings to CSV (the same shape `push` reads back)."""
+    with _client() as client:
+        with console.status(f"Fetching {state} listings…"):
+            rows = listings_mod.pull(client, state=state, max_items=limit)
+    if not rows:
+        _warn(f"No {state} listings found.")
+        raise typer.Exit(1)
+    columns = listings_mod.LISTING_COLUMNS + ["url", "views", "num_favorers"]
+    csvio.write_rows(out, rows, columns=columns)
+    _ok(f"Exported {len(rows)} listing(s) to {out}")
+
+
+@listings_app.command("push")
+def listings_push(
+    src: Path = typer.Argument(..., help="CSV to read. Empty listing_id creates, filled updates."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate everything, send nothing."),
+    no_images: bool = typer.Option(False, "--no-images", help="Skip image uploads."),
+    out: Optional[Path] = typer.Option(
+        None, "--out", "-o", help="Write results (with new listing_ids) to this CSV."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Create or update listings in bulk. New listings are always created as drafts."""
+    rows = csvio.read_rows(src)
+    if not rows:
+        _warn(f"{src} has no data rows.")
+        raise typer.Exit(1)
+
+    creates = sum(1 for r in rows if not r.get("listing_id"))
+    updates = len(rows) - creates
+
+    if not dry_run and not yes:
+        console.print(
+            Panel(
+                f"About to create [bold]{creates}[/] draft listing(s) and "
+                f"update [bold]{updates}[/] existing listing(s) in your live Etsy shop.\n"
+                f"New listings are created as [bold]drafts[/] and will not go public until you "
+                f"publish them in Etsy.",
+                title="Confirm",
+                border_style="yellow",
+            )
+        )
+        if not typer.confirm("Proceed?"):
+            _warn("Cancelled.")
+            raise typer.Exit(1)
+
+    push_args = {
+        "base_dir": src.resolve().parent,
+        "dry_run": dry_run,
+        "upload_images": not no_images,
+        "on_progress": _print_row_result,
+    }
+    if dry_run:
+        # Validation is entirely local, so this works before you even have API access.
+        report = listings_mod.push(None, rows, **push_args)
+    else:
+        with _client() as client:
+            report = listings_mod.push(client, rows, **push_args)
+
+    console.print()
+    if dry_run:
+        valid = sum(1 for r in report.results if not r.failed)
+        _ok(f"Dry run: {valid} row(s) valid, {report.errors} with problems. Nothing was sent.")
+    else:
+        _ok(
+            f"Created {report.created}, updated {report.updated}, "
+            f"uploaded {report.images} image(s), {report.errors} error(s)."
+        )
+        if report.created:
+            console.print("[dim]New listings are drafts — publish them from your Etsy dashboard.[/]")
+
+    if out:
+        csvio.write_rows(
+            out,
+            [
+                {
+                    "row": r.row,
+                    "listing_id": r.listing_id or "",
+                    "action": r.action,
+                    "status": r.status,
+                    "title": r.title,
+                    "images_uploaded": r.images_uploaded,
+                    "message": r.message,
+                }
+                for r in report.results
+            ],
+            columns=["row", "listing_id", "action", "status", "title", "images_uploaded", "message"],
+        )
+        _ok(f"Results written to {out}")
+
+    if report.errors:
+        raise typer.Exit(1)
+
+
+def _print_row_result(result: listings_mod.RowResult) -> None:
+    if result.failed:
+        err_console.print(f"[red]{CROSS} row {result.row}[/] {result.title} — {result.message}")
+    elif result.status == "dry-run":
+        console.print(
+            f"[dim]{BULLET} row {result.row}[/] {result.action}: {result.title} ({result.message})"
+        )
+    else:
+        extra = f", {result.images_uploaded} image(s)" if result.images_uploaded else ""
+        console.print(
+            f"[green]{TICK} row {result.row}[/] {result.action} {result.listing_id} — "
+            f"{result.title}{extra}"
+        )
+    for warning in result.warnings:
+        console.print(f"    [yellow]![/] {warning}")
+
+
+# ---------------------------------------------------------------- orders
+
+
+@orders_app.command("pull")
+def orders_pull(
+    out: Path = typer.Option(Path("orders.csv"), "--out", "-o"),
+    since: str = typer.Option("30d", help="30d, 6w, 3m, or a date like 2026-01-01."),
+    unshipped: bool = typer.Option(False, "--unshipped", help="Only orders not yet marked shipped."),
+    include_unpaid: bool = typer.Option(False, "--include-unpaid", help="Include unpaid orders."),
+    limit: Optional[int] = typer.Option(None, help="Stop after this many orders."),
+) -> None:
+    """Export orders to CSV."""
+    min_created = orders_mod.parse_since(since)
+    with _client() as client:
+        with console.status("Fetching orders…"):
+            rows = orders_mod.pull(
+                client,
+                since=min_created,
+                unshipped_only=unshipped,
+                paid_only=not include_unpaid,
+                max_items=limit,
+            )
+    if not rows:
+        _warn("No orders matched those filters.")
+        raise typer.Exit(1)
+    csvio.write_rows(out, rows, columns=orders_mod.ORDER_COLUMNS)
+    _ok(f"Exported {len(rows)} order(s) to {out}")
+
+    if unshipped:
+        console.print(
+            "[dim]Tip: add tracking_code and carrier_name columns to this file, "
+            "then run `etsykit orders ship`.[/]"
+        )
+
+
+@orders_app.command("carriers")
+def orders_carriers(
+    country: str = typer.Option(..., "--country", "-c", help="Origin country ISO code, e.g. TR, US, DE."),
+    search: Optional[str] = typer.Option(None, help="Filter the list."),
+) -> None:
+    """List the carrier_name values Etsy accepts for your shipping origin."""
+    with _client() as client:
+        carriers = client.shipping_carriers(country.upper())
+    if search:
+        needle = search.lower()
+        carriers = [c for c in carriers if needle in str(c.get("name", "")).lower()]
+    if not carriers:
+        _warn(f"No carriers returned for {country.upper()}.")
+        raise typer.Exit(1)
+    table = Table(title=f"Carriers shipping from {country.upper()}", title_justify="left")
+    table.add_column("carrier_name", style="cyan")
+    table.add_column("domestic")
+    table.add_column("international")
+    for carrier in carriers:
+        table.add_row(
+            str(carrier.get("name", "")),
+            str(carrier.get("domestic_classes") and len(carrier["domestic_classes"]) or "—"),
+            str(carrier.get("international_classes") and len(carrier["international_classes"]) or "—"),
+        )
+    console.print(table)
+
+
+@orders_app.command("ship")
+def orders_ship(
+    src: Path = typer.Argument(..., help="CSV with receipt_id, tracking_code, carrier_name."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate only."),
+    country: Optional[str] = typer.Option(
+        None, "--country", "-c", help="Validate carrier names against this origin country."
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Do not ask for confirmation."),
+) -> None:
+    """Upload tracking numbers. Etsy emails each buyer and marks the order shipped."""
+    all_rows = csvio.read_rows(src)
+    # Rows without a tracking code are skipped so an `orders pull` export can be fed
+    # straight back in — but say so out loud, because a silently dropped row here is
+    # an order the seller believes they shipped.
+    rows = [r for r in all_rows if r.get("tracking_code")]
+    skipped = len(all_rows) - len(rows)
+    if skipped:
+        _warn(f"{skipped} row(s) have no tracking_code and will be skipped.")
+    if not rows:
+        _warn(f"{src} has no rows with a tracking_code.")
+        raise typer.Exit(1)
+
+    if not dry_run and not yes:
+        console.print(
+            Panel(
+                f"About to submit tracking for [bold]{len(rows)}[/] order(s).\n"
+                f"Etsy will [bold]email each buyer[/] and mark the order shipped. "
+                f"This cannot be undone from the API.",
+                title="Confirm",
+                border_style="yellow",
+            )
+        )
+        if not typer.confirm("Proceed?"):
+            _warn("Cancelled.")
+            raise typer.Exit(1)
+
+    if dry_run and not country:
+        # No network needed: nothing is sent and no carrier list is being checked.
+        report = orders_mod.ship(None, rows, dry_run=True, on_progress=_print_ship_result)
+    else:
+        with _client() as client:
+            valid = None
+            if country:
+                valid = [str(c.get("name", "")) for c in client.shipping_carriers(country.upper())]
+            report = orders_mod.ship(
+                client, rows, dry_run=dry_run, valid_carriers=valid, on_progress=_print_ship_result
+            )
+
+    console.print()
+    if dry_run:
+        valid = sum(1 for r in report.results if not r.failed)
+        _ok(f"Dry run: {valid} row(s) valid, {report.errors} problem(s). Nothing was sent.")
+    else:
+        _ok(f"Submitted {report.shipped} shipment(s), {report.errors} error(s).")
+    if report.errors:
+        raise typer.Exit(1)
+
+
+def _print_ship_result(result: orders_mod.ShipResult) -> None:
+    if result.failed:
+        err_console.print(
+            f"[red]{CROSS} row {result.row}[/] receipt {result.receipt_id} — {result.message}"
+        )
+    else:
+        prefix = BULLET if result.status == "dry-run" else TICK
+        colour = "dim" if result.status == "dry-run" else "green"
+        console.print(f"[{colour}]{prefix} row {result.row}[/] receipt {result.receipt_id} — {result.message}")
+
+
+# ---------------------------------------------------------------- seo
+
+
+@seo_app.command("audit")
+def seo_audit(
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Write the full report to CSV."),
+    state: str = typer.Option("active", help="Which listings to audit."),
+    limit: Optional[int] = typer.Option(None, help="Stop after this many listings."),
+    worst: int = typer.Option(15, help="How many of the weakest listings to print."),
+) -> None:
+    """Score your listings against Etsy's limits and search mechanics."""
+    with _client() as client:
+        with console.status("Auditing listings…"):
+            audits = seo_mod.audit_all(client, state=state, max_items=limit)
+    if not audits:
+        _warn(f"No {state} listings to audit.")
+        raise typer.Exit(1)
+
+    audits.sort(key=lambda a: a.score)
+    average = sum(a.score for a in audits) / len(audits)
+    poor = sum(1 for a in audits if a.grade == "poor")
+
+    table = Table(title=f"Weakest listings ({len(audits)} audited, average score {average:.0f})",
+                  title_justify="left")
+    table.add_column("score", justify="right")
+    table.add_column("listing_id", style="cyan")
+    table.add_column("title", max_width=42, overflow="ellipsis")
+    table.add_column("issues", overflow="fold")
+    for item in audits[:worst]:
+        colour = {"good": "green", "fair": "yellow", "poor": "red"}[item.grade]
+        table.add_row(
+            f"[{colour}]{item.score}[/]",
+            str(item.listing_id),
+            item.title,
+            item.summary(),
+        )
+    console.print(table)
+
+    counter: dict[str, int] = {}
+    for item in audits:
+        for issue in item.issues:
+            counter[issue.code] = counter.get(issue.code, 0) + 1
+    if counter:
+        summary = Table(title="Most common problems", title_justify="left")
+        summary.add_column("issue", style="cyan")
+        summary.add_column("listings", justify="right")
+        for code, count in sorted(counter.items(), key=lambda kv: -kv[1])[:10]:
+            summary.add_row(code, str(count))
+        console.print(summary)
+
+    console.print(f"\n{poor} listing(s) scored below 60.")
+
+    if out:
+        csvio.write_rows(
+            out,
+            [
+                {
+                    "listing_id": a.listing_id,
+                    "score": a.score,
+                    "grade": a.grade,
+                    "title": a.title,
+                    "url": a.url,
+                    "issue_count": len(a.issues),
+                    "issues": a.summary(),
+                }
+                for a in audits
+            ],
+            columns=["listing_id", "score", "grade", "title", "url", "issue_count", "issues"],
+        )
+        _ok(f"Full report written to {out}")
+
+
+@seo_app.command("keywords")
+def seo_keywords(
+    keyword: str = typer.Argument(..., help="The search term to study."),
+    sample: int = typer.Option(200, help="How many ranking listings to sample (max ~1000)."),
+    out: Optional[Path] = typer.Option(None, "--out", "-o", help="Write tag frequencies to CSV."),
+) -> None:
+    """Study the listings Etsy ranks for a term: their tags, phrases and price band.
+
+    Works without logging in — only your API keystring is needed.
+    """
+    with _client(require_auth=False) as client:
+        with console.status(f"Sampling listings for {keyword!r}…"):
+            report = seo_mod.research(client, keyword, sample=sample)
+
+    if report.empty:
+        _warn(f"Etsy returned no active listings for {keyword!r}.")
+        raise typer.Exit(1)
+
+    lines = [f"Sampled [bold]{report.sampled}[/] listings ranking for [bold]{keyword}[/]"]
+    if report.price_median is not None:
+        lines.append(
+            f"Price  {report.price_min:.2f} – [bold]{report.price_median:.2f}[/] – "
+            f"{report.price_max:.2f} {report.currency}"
+        )
+        if report.price_band_is_partial:
+            # Etsy prices each listing in its shop's own currency, so this band
+            # covers one currency only. Say which, and how much of the sample.
+            lines.append(
+                f"[dim]{report.price_sample} of {report.sampled} listings priced in "
+                f"{report.currency}; {report.currency_count} currencies in the sample.[/]"
+            )
+    if report.median_favorers is not None:
+        lines.append(f"Median favourites: {report.median_favorers:.0f}")
+    console.print(Panel("\n".join(lines), border_style="cyan"))
+
+    tags_table = Table(title="Tags used by ranking listings", title_justify="left")
+    tags_table.add_column("tag", style="cyan")
+    tags_table.add_column("listings", justify="right")
+    tags_table.add_column("share", justify="right")
+    for tag, count in report.tags[:20]:
+        tags_table.add_row(tag, str(count), f"{count / report.sampled:.0%}")
+    console.print(tags_table)
+
+    phrase_table = Table(title="Recurring title phrases", title_justify="left")
+    phrase_table.add_column("phrase", style="cyan")
+    phrase_table.add_column("listings", justify="right")
+    for phrase, count in report.phrases[:20]:
+        phrase_table.add_row(phrase, str(count))
+    console.print(phrase_table)
+
+    top_table = Table(title="Most-favourited in the sample", title_justify="left")
+    top_table.add_column("favourites", justify="right")
+    top_table.add_column("price", justify="right")
+    top_table.add_column("title", max_width=60, overflow="ellipsis")
+    for row in report.top_listings[:8]:
+        top_table.add_row(str(row["num_favorers"]), f"{row['price']} {row['currency']}", row["title"])
+    console.print(top_table)
+
+    if out:
+        csvio.write_rows(
+            out,
+            [
+                {"type": "tag", "value": tag, "listings": count, "share": f"{count / report.sampled:.4f}"}
+                for tag, count in report.tags
+            ]
+            + [
+                {"type": "phrase", "value": phrase, "listings": count, "share": ""}
+                for phrase, count in report.phrases
+            ],
+            columns=["type", "value", "listings", "share"],
+        )
+        _ok(f"Written to {out}")
+
+
+@seo_app.command("suggest")
+def seo_suggest(
+    listing_id: int = typer.Argument(..., help="One of your listing IDs."),
+    keyword: Optional[str] = typer.Option(
+        None, help="Term to research. Defaults to the listing's own title."
+    ),
+    sample: int = typer.Option(200, help="How many ranking listings to sample."),
+) -> None:
+    """Audit one listing, then suggest tags drawn from what ranks for its keyword."""
+    with _client() as client:
+        listing = client.get(f"/listings/{listing_id}")
+        audit = seo_mod.audit_listing(listing)
+
+        colour = {"good": "green", "fair": "yellow", "poor": "red"}[audit.grade]
+        console.print(
+            Panel(
+                f"[bold]{audit.title}[/]\nScore: [{colour}]{audit.score}/100[/] ({audit.grade})",
+                border_style=colour,
+            )
+        )
+        if audit.issues:
+            table = Table(show_header=True)
+            table.add_column("severity")
+            table.add_column("issue", style="cyan")
+            table.add_column("detail", overflow="fold")
+            for issue in audit.issues:
+                shade = {"error": "red", "warn": "yellow", "info": "dim"}[issue.severity]
+                table.add_row(f"[{shade}]{issue.severity}[/]", issue.code, issue.message)
+            console.print(table)
+        else:
+            _ok("No issues found.")
+
+        term = keyword or " ".join((listing.get("title") or "").split()[:4])
+        if not term.strip():
+            return
+        with console.status(f"Researching {term!r}…"):
+            report = seo_mod.research(client, term, sample=sample)
+
+    if report.empty:
+        _warn(f"No market data for {term!r}.")
+        return
+
+    missing = seo_mod.suggest_tags(report, existing=listing.get("tags") or [])
+    if missing:
+        console.print(f"\n[bold]Tags used by listings ranking for {term!r} that you do not use:[/]")
+        for tag in missing:
+            share = next((c for t, c in report.tags if t == tag), 0) / report.sampled
+            console.print(f"  [cyan]{tag}[/] [dim]({share:.0%} of ranking listings)[/]")
+        console.print(
+            "\n[dim]Judgement still required: only add tags that genuinely describe your item. "
+            "Irrelevant tags hurt conversion, which Etsy weights heavily.[/]"
+        )
+    else:
+        _ok("Your tags already cover the common ones in this market.")
+
+
+def main() -> None:
+    """Entry point. Turns library errors into clean CLI output."""
+    try:
+        app()
+    except EtsyKitError as exc:
+        err_console.print(f"[bold red]Error:[/] {exc}")
+        hint = getattr(exc, "hint", None)
+        if callable(hint) and hint():
+            err_console.print(f"[yellow]→[/] {hint()}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        err_console.print("\n[yellow]Cancelled.[/]")
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,34 @@
+# Secrets — never commit these
+.env
+.env.*
+!.env.example
+*.token.json
+token.json
+credentials.json
+
+# etsykit local state (tokens live here by default)
+.etsykit/
+
+# Working data — sellers' own exports
+*.local.csv
+out/
+exports/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
