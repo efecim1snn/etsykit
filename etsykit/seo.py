@@ -213,6 +213,123 @@ def audit_all(client: EtsyClient, *, state: str = "active", max_items: int | Non
     return [audit_listing(listing) for listing in client.listings_by_shop(state=state, max_items=max_items)]
 
 
+# --- the shop as a whole ---------------------------------------------------------
+#
+# audit_listing() judges one listing in isolation, which is the right unit for most
+# things — but it makes a whole class of problem invisible. If every listing in a shop
+# carries the same tags, each one scores perfectly while they all compete with each
+# other for the same query, and Etsy generally surfaces only one or two listings from
+# the same shop in a result. Nothing you can see from inside a single listing tells you
+# that. So this looks across the shop instead.
+
+# A tag on more than this share of a shop's listings is doing shop-level work, not
+# listing-level work. It is not wasted — it is how the shop becomes eligible at all —
+# but it no longer distinguishes one listing from its siblings.
+SHOP_WIDE_SHARE = 0.5
+
+# Below this many distinguishing tags, a listing has little to say that its siblings
+# do not already say.
+MIN_DISTINCTIVE_TAGS = 5
+
+
+@dataclass
+class ShopAudit:
+    listings: int
+    shop_wide: list[tuple[str, int]] = field(default_factory=list)
+    """Tags carried by more than SHOP_WIDE_SHARE of the shop, most common first."""
+    distinctive_per_listing: dict[int, int] = field(default_factory=dict)
+    crowded: list[tuple[int, str, int]] = field(default_factory=list)
+    """(listing_id, title, distinctive count) for listings with too little of their own."""
+    issues: list[Issue] = field(default_factory=list)
+
+    @property
+    def median_distinctive(self) -> float:
+        values = sorted(self.distinctive_per_listing.values())
+        return statistics.median(values) if values else 0.0
+
+
+def audit_shop(listings: Sequence[dict[str, Any]]) -> ShopAudit:
+    """Find problems that only exist between listings, not inside them."""
+    total = len(listings)
+    result = ShopAudit(listings=total)
+    if total < 2:
+        return result
+
+    counts: Counter[str] = Counter()
+    per_listing: dict[int, set[str]] = {}
+    for listing in listings:
+        tags = {
+            cleaned
+            for tag in (listing.get("tags") or [])
+            if (cleaned := str(tag).strip().lower())
+        }
+        per_listing[int(listing.get("listing_id") or 0)] = tags
+        counts.update(tags)
+
+    cutoff = max(2, int(total * SHOP_WIDE_SHARE))
+    shop_wide = {tag for tag, n in counts.items() if n >= cutoff}
+    result.shop_wide = sorted(
+        ((tag, counts[tag]) for tag in shop_wide), key=lambda kv: -kv[1]
+    )
+
+    for listing in listings:
+        listing_id = int(listing.get("listing_id") or 0)
+        distinctive = len(per_listing[listing_id] - shop_wide)
+        result.distinctive_per_listing[listing_id] = distinctive
+        if distinctive < MIN_DISTINCTIVE_TAGS:
+            result.crowded.append((listing_id, str(listing.get("title", ""))[:60], distinctive))
+
+    result.crowded.sort(key=lambda row: row[2])
+
+    if result.shop_wide:
+        share = result.shop_wide[0][1] / total
+        result.issues.append(
+            Issue(
+                "shop.tag_overlap",
+                "warn" if share < 0.8 else "error",
+                f"{len(result.shop_wide)} tag(s) appear on at least {cutoff} of your "
+                f"{total} listings. They win the shop a place in those searches, but "
+                f"they cannot separate one listing from another — and Etsy rarely shows "
+                f"two listings from the same shop in one result.",
+            )
+        )
+    if result.crowded:
+        result.issues.append(
+            Issue(
+                "shop.too_alike",
+                "warn",
+                f"{len(result.crowded)} listing(s) have fewer than {MIN_DISTINCTIVE_TAGS} "
+                f"tags their siblings do not already use. Those listings mostly compete "
+                f"with each other rather than reaching new buyers.",
+            )
+        )
+    return result
+
+
+def overlapping_pairs(
+    listings: Sequence[dict[str, Any]], *, limit: int = 5, threshold: float = 0.7
+) -> list[tuple[str, str, float]]:
+    """The listing pairs most likely to be cannibalising each other, worst first."""
+    prepared = [
+        (
+            str(listing.get("title", ""))[:44],
+            {str(t).strip().lower() for t in (listing.get("tags") or []) if str(t).strip()},
+        )
+        for listing in listings
+    ]
+    pairs = []
+    for i, (title_a, tags_a) in enumerate(prepared):
+        for title_b, tags_b in prepared[i + 1:]:
+            union = tags_a | tags_b
+            if not union:
+                continue
+            similarity = len(tags_a & tags_b) / len(union)
+            if similarity >= threshold:
+                pairs.append((title_a, title_b, similarity))
+    pairs.sort(key=lambda row: -row[2])
+    return pairs[:limit]
+
+
 # --- market research ------------------------------------------------------------
 
 

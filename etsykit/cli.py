@@ -844,10 +844,13 @@ def seo_audit(
     """Score your listings against Etsy's limits and search mechanics."""
     with _client() as client:
         with console.status("Auditing listings…"):
-            audits = seo_mod.audit_all(client, state=state, max_items=limit)
-    if not audits:
+            listings = list(client.listings_by_shop(state=state, max_items=limit))
+    if not listings:
         _warn(f"No {state} listings to audit.")
         raise typer.Exit(1)
+
+    audits = [seo_mod.audit_listing(listing) for listing in listings]
+    shop = seo_mod.audit_shop(listings)
 
     audits.sort(key=lambda a: a.score)
     average = sum(a.score for a in audits) / len(audits)
@@ -882,6 +885,37 @@ def seo_audit(
         console.print(summary)
 
     console.print(f"\n{poor} listing(s) scored below 60.")
+
+    # Everything above judges each listing on its own, which cannot see a shop whose
+    # listings all say the same thing. This can.
+    if shop.issues:
+        console.print()
+        for issue in shop.issues:
+            shade = {"error": "red", "warn": "yellow", "info": "dim"}[issue.severity]
+            console.print(f"[{shade}]![/] [bold]Across the whole shop:[/] {issue.message}")
+
+        if shop.shop_wide:
+            table = Table(title="Tags shared across your own listings", title_justify="left")
+            table.add_column("tag", style="cyan")
+            table.add_column("your listings", justify="right")
+            for tag, count in shop.shop_wide[:10]:
+                table.add_row(tag, f"{count}/{shop.listings}")
+            console.print(table)
+
+        console.print(
+            f"[dim]Median tags that distinguish a listing from its siblings: "
+            f"{shop.median_distinctive:.0f} of 13.[/]"
+        )
+
+        pairs = seo_mod.overlapping_pairs(listings)
+        if pairs:
+            table = Table(title="Listings most alike, and so competing", title_justify="left")
+            table.add_column("overlap", justify="right")
+            table.add_column("listing", max_width=34, overflow="ellipsis")
+            table.add_column("and", max_width=34, overflow="ellipsis")
+            for title_a, title_b, similarity in pairs:
+                table.add_row(f"{similarity:.0%}", title_a, title_b)
+            console.print(table)
 
     if out:
         csvio.write_rows(
