@@ -520,6 +520,15 @@ mangle `ç`, `ğ`, `ü`, `é` or `ß`. Prices accept a decimal comma.
 **Secrets.** The keystring lives in `.env` (git-ignored). The token lives in
 `~/.etsykit/token.json`, written `0600`. Neither is ever printed in full.
 
+**Sharing output.** Terminal output gets screenshotted more often than anyone plans
+for, and a listing title is enough to find the shop it belongs to. `--anonymise`
+(or `ETSYKIT_ANONYMISE=1`) hides your shop name, ids, titles, URLs and tags while
+leaving the findings readable — so a screenshot can be posted without exposing the shop:
+
+```bash
+etsykit --anonymise seo audit
+```
+
 ### Development
 
 ```bash

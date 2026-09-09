@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -55,6 +56,22 @@ _force_utf8(sys.stderr)
 TICK = _symbol("✓", "OK")
 CROSS = _symbol("✗", "X")
 BULLET = _symbol("·", "-")
+
+# Output is screenshotted and shared far more often than anyone plans for, and a
+# listing title is enough to find the shop it belongs to. With this on, the findings
+# stay readable and the identity does not survive the screenshot.
+ANONYMISE = os.environ.get("ETSYKIT_ANONYMISE", "").strip().lower() in {"1", "true", "yes"}
+
+# Guillemets, not square brackets: Rich reads "[hidden]" as markup and prints nothing,
+# which looks like a bug rather than a redaction.
+_HIDDEN = {"id": "#" + "•" * 8, "title": "‹hidden›", "shop": "‹your shop›", "url": "‹hidden›"}
+
+
+def _hide(value: Any, kind: str = "title") -> str:
+    """Return the value, or a placeholder when anonymised output is on."""
+    if not ANONYMISE:
+        return str(value)
+    return _HIDDEN.get(kind, "‹hidden›")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -115,8 +132,18 @@ def _root(
         is_eager=True,
         callback=_version_callback,
     ),
+    anonymise: bool = typer.Option(
+        False,
+        "--anonymise",
+        "--anonymize",
+        help="Hide your shop name, listing ids, titles and URLs in the output, so a "
+        "screenshot can be shared without exposing your shop. Also ETSYKIT_ANONYMISE=1.",
+    ),
 ) -> None:
     """etsykit — Etsy seller automation over the official Open API v3."""
+    global ANONYMISE
+    if anonymise:
+        ANONYMISE = True
 
 
 # ---------------------------------------------------------------- auth
@@ -157,7 +184,10 @@ def auth_login(
         )
     with EtsyClient(config, token=token) as client:
         shop = client.shop()
-        console.print(f"  shop:   {shop.get('shop_name')} (id {shop.get('shop_id')})")
+        console.print(
+            f"  shop:   {_hide(shop.get('shop_name'), 'shop')} "
+            f"(id {_hide(shop.get('shop_id'), 'id')})"
+        )
 
 
 @auth_app.command("status")
@@ -171,7 +201,7 @@ def auth_status() -> None:
 
     table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     table.add_row("token file", str(token_path()))
-    table.add_row("user id", str(token.user_id or "unknown"))
+    table.add_row("user id", _hide(token.user_id or "unknown", "id"))
     table.add_row("scopes", " ".join(token.scopes) or "unknown")
     table.add_row(
         "expires in",
@@ -180,7 +210,10 @@ def auth_status() -> None:
     if config.keystring:
         with EtsyClient(config, token=token) as client:
             shop = client.shop()
-            table.add_row("shop", f"{shop.get('shop_name')} (id {shop.get('shop_id')})")
+            table.add_row(
+                "shop",
+                f"{_hide(shop.get('shop_name'), 'shop')} (id {_hide(shop.get('shop_id'), 'id')})",
+            )
             table.add_row("active listings", str(shop.get("listing_active_count", "?")))
             if client.quota_remaining is not None:
                 table.add_row("daily quota left", str(client.quota_remaining))
@@ -406,6 +439,7 @@ def shop_info() -> None:
     """Print your shop's identifiers and headline numbers."""
     with _client() as client:
         shop = client.shop()
+    identifying = {"shop_name": "shop", "shop_id": "id", "url": "url"}
     table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     for label, key in [
         ("shop name", "shop_name"),
@@ -420,7 +454,8 @@ def shop_info() -> None:
         ("rating", "review_average"),
         ("on vacation", "is_vacation"),
     ]:
-        table.add_row(label, str(shop.get(key, "—")))
+        value = shop.get(key, "—")
+        table.add_row(label, _hide(value, identifying[key]) if key in identifying else str(value))
     console.print(table)
 
 
@@ -679,22 +714,23 @@ def listings_push(
 
 def _print_row_result(result: listings_mod.RowResult) -> None:
     if result.failed:
-        err_console.print(f"[red]{CROSS} row {result.row}[/] {result.title} — {result.message}")
-    elif result.status == "partial":
-        console.print(
-            f"[yellow]! row {result.row}[/] {result.title} — {result.message}"
+        err_console.print(
+            f"[red]{CROSS} row {result.row}[/] {_hide(result.title)} — {result.message}"
         )
+    elif result.status == "partial":
+        console.print(f"[yellow]! row {result.row}[/] {_hide(result.title)} — {result.message}")
     elif result.status == "skipped":
         console.print(f"[dim]{BULLET} row {result.row}[/] skipped — {result.message}")
     elif result.status == "dry-run":
         console.print(
-            f"[dim]{BULLET} row {result.row}[/] {result.action}: {result.title} ({result.message})"
+            f"[dim]{BULLET} row {result.row}[/] {result.action}: "
+            f"{_hide(result.title)} ({result.message})"
         )
     else:
         extra = f", {result.images_uploaded} image(s)" if result.images_uploaded else ""
         console.print(
-            f"[green]{TICK} row {result.row}[/] {result.action} {result.listing_id} — "
-            f"{result.title}{extra}"
+            f"[green]{TICK} row {result.row}[/] {result.action} "
+            f"{_hide(result.listing_id, 'id')} — {_hide(result.title)}{extra}"
         )
     for warning in result.warnings:
         console.print(f"    [yellow]![/] {warning}")
@@ -866,8 +902,8 @@ def seo_audit(
         colour = {"good": "green", "fair": "yellow", "poor": "red"}[item.grade]
         table.add_row(
             f"[{colour}]{item.score}[/]",
-            str(item.listing_id),
-            item.title,
+            _hide(item.listing_id, "id"),
+            _hide(item.title),
             item.summary(),
         )
     console.print(table)
@@ -898,8 +934,9 @@ def seo_audit(
             table = Table(title="Tags shared across your own listings", title_justify="left")
             table.add_column("tag", style="cyan")
             table.add_column("your listings", justify="right")
+            # A tag names the niche as surely as the shop does.
             for tag, count in shop.shop_wide[:10]:
-                table.add_row(tag, f"{count}/{shop.listings}")
+                table.add_row(_hide(tag), f"{count}/{shop.listings}")
             console.print(table)
 
         console.print(
@@ -914,7 +951,7 @@ def seo_audit(
             table.add_column("listing", max_width=34, overflow="ellipsis")
             table.add_column("and", max_width=34, overflow="ellipsis")
             for title_a, title_b, similarity in pairs:
-                table.add_row(f"{similarity:.0%}", title_a, title_b)
+                table.add_row(f"{similarity:.0%}", _hide(title_a), _hide(title_b))
             console.print(table)
 
     if out:
@@ -1030,7 +1067,8 @@ def seo_suggest(
         colour = {"good": "green", "fair": "yellow", "poor": "red"}[audit.grade]
         console.print(
             Panel(
-                f"[bold]{audit.title}[/]\nScore: [{colour}]{audit.score}/100[/] ({audit.grade})",
+                f"[bold]{_hide(audit.title)}[/]\n"
+                f"Score: [{colour}]{audit.score}/100[/] ({audit.grade})",
                 border_style=colour,
             )
         )
@@ -1131,11 +1169,11 @@ def drop_template(
 
     captured = template_mod.capture(listing)
     ws.write_template(captured.to_dict())
-    _ok(f"Captured listing {captured.source_listing_id} into {ws.template_path}")
+    _ok(f"Captured listing {_hide(captured.source_listing_id, 'id')} into {ws.template_path}")
 
     table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
     for label, value in captured.describe():
-        table.add_row(label, value)
+        table.add_row(label, _hide(value) if label in {"Copied from", "Its tags"} else value)
     console.print(table)
 
     gaps = captured.missing_for_a_physical_draft()

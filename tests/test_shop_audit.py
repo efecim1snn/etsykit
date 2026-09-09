@@ -12,12 +12,15 @@ import pytest
 from etsykit.seo import audit_listing, audit_shop, overlapping_pairs
 
 
-def _listing(listing_id, tags, title="Wallpaper Mural"):
+def _listing(listing_id, tags, title="Soy Candle"):
     return {"listing_id": listing_id, "title": title, "tags": tags, "description": "x" * 300}
 
 
-SHARED = ["removable wallpaper", "peel and stick", "self adhesive", "temporary wallpaper",
-          "renter friendly", "wallpaper mural", "wall mural"]
+# Deliberately generic fixture vocabulary. Test data should never carry the niche of
+# whoever happened to be running the tool when a bug was found — a public test file
+# is a fingerprint, and a seller's shop is theirs to disclose, not the repository's.
+SHARED = ["soy wax candle", "hand poured candle", "scented candle", "gift for her",
+          "home fragrance", "candle gift set", "vegan candle"]
 
 
 def _shop(count, distinctive_each):
@@ -38,21 +41,21 @@ def test_a_shop_where_every_listing_says_the_same_thing_is_flagged():
 def test_the_per_listing_audit_still_calls_those_listings_perfect():
     # This is the blind spot, stated as a test so it cannot quietly come back:
     # a listing can be flawless on its own terms while the shop it sits in is not.
-    title = "Dining Room Wallpaper Mural | Botanical Lavender Peel and Stick Removable"
+    title = "Soy Wax Candle Gift Set | Hand Poured Lavender Scented Vegan Candle"
     listing = {
         "listing_id": 1,
         "title": title,
         "description": (
-            f"{title}. A dining room wallpaper mural with a botanical lavender pattern, "
-            "offered as peel and stick removable wallpaper or traditional paste. "
+            f"{title}. A soy wax candle gift set, hand poured with lavender scent, "
+            "a vegan candle made for home fragrance and given as a gift. "
         ) * 3,
         "tags": [
-            "removable wallpaper", "peel and stick", "wallpaper mural", "dining wallpaper",
-            "botanical wallpaper", "lavender wallpaper", "removable mural", "stick wallpaper",
-            "dining mural", "botanical mural", "lavender mural", "botanical lavender",
-            "dining botanical",
+            "soy wax candle", "hand poured candle", "scented candle", "lavender candle",
+            "vegan candle", "candle gift set", "soy candle gift", "poured candle",
+            "lavender scented", "candle set", "wax candle gift", "hand poured wax",
+            "lavender gift",
         ],
-        "materials": ["vinyl"],
+        "materials": ["soy wax"],
         "should_auto_renew": True,
         "state": "active",
     }
