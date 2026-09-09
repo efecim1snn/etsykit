@@ -11,7 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from . import __version__, auth, csvio
+from . import __version__, auth, clipboard, csvio
 from . import listings as listings_mod
 from . import orders as orders_mod
 from . import seo as seo_mod
@@ -216,6 +216,12 @@ def init(
     path: Path = typer.Option(Path(".env"), "--path", help="Where to write the file."),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing .env."),
     check: bool = typer.Option(True, "--check/--no-check", help="Verify the credential with Etsy."),
+    from_clipboard: bool = typer.Option(
+        False,
+        "--from-clipboard",
+        help="Take the shared secret from the clipboard instead of a prompt. "
+        "Useful right after clicking 'copy' on your Etsy app page.",
+    ),
 ) -> None:
     """Write a .env interactively.
 
@@ -232,7 +238,12 @@ def init(
     )
 
     keystring = keystring or typer.prompt("Keystring")
-    secret = typer.prompt("Shared secret", hide_input=True)
+    if from_clipboard:
+        secret = clipboard.read_text()
+        # Length only. The value is never printed, by anything, ever.
+        console.print(f"Shared secret: read {len(secret)} characters from the clipboard")
+    else:
+        secret = typer.prompt("Shared secret", hide_input=True)
     keystring, secret = split_credential(keystring, secret)
     if not keystring or not secret:
         _fail("Both the keystring and the shared secret are required.")

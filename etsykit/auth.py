@@ -361,7 +361,7 @@ def _capture_via_listener(request: AuthRequest, config: Config, port: int, timeo
     server.socket.settimeout(1.0)
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.4}, daemon=True)
     thread.start()
-    print(f"Listening on port {port} for the redirect to {config.redirect_uri} ...")
+    print(f"Listening on port {port} for the redirect to {config.redirect_uri} ...", flush=True)
 
     deadline = time.time() + timeout
     try:
@@ -403,8 +403,11 @@ def login(
         parsed = urllib.parse.urlparse(config.redirect_uri)
         listen_port = parsed.port or (443 if parsed.scheme == "https" else 80)
 
-    print("Open this URL to authorise etsykit with your Etsy account:\n")
-    print(f"  {request.url}\n")
+    # flush=True matters: Python buffers stdout when it is not a terminal, so a piped
+    # or redirected `auth login` would print the URL only after the flow finished —
+    # by which point the URL you needed to open is useless.
+    print("Open this URL to authorise etsykit with your Etsy account:\n", flush=True)
+    print(f"  {request.url}\n", flush=True)
     if open_browser:
         try:
             webbrowser.open(request.url)
