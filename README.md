@@ -58,6 +58,11 @@ is measured from the listings Etsy actually returns for a term.
 
 Requires Python 3.9 or newer.
 
+> **Setting up for the first time? Read [SETUP.md](SETUP.md)** — it lists every
+> prerequisite and why each one is not optional, in English and Turkish. Or just run
+> **`etsykit setup`**, which walks the list, asks about the parts no program can check,
+> and tells you the single next command to run.
+
 ```bash
 git clone https://github.com/efecim1snn/etsykit.git
 cd etsykit

@@ -15,6 +15,7 @@ from . import __version__, auth, csvio
 from . import listings as listings_mod
 from . import orders as orders_mod
 from . import seo as seo_mod
+from . import setup as setup_mod
 from .client import EtsyClient
 from .config import Config, split_credential, token_path, write_env_file
 from .drop import pipeline
@@ -272,46 +273,118 @@ def init(
     console.print("\nNext: [cyan]etsykit auth login[/]")
 
 
+def _run_checklist(*, interactive: bool) -> int:
+    """Walk every prerequisite, ask about the ones no code can verify, and report."""
+    console.print("[bold]etsykit setup[/] — everything that must be true before this works\n")
+
+    results: list[tuple[setup_mod.Step, setup_mod.StepResult]] = []
+    blocked = False
+
+    for step in setup_mod.build_steps():
+        # Once something required is missing, later checks would only report knock-on
+        # failures. Show them as pending rather than as new problems.
+        if blocked and step.required:
+            results.append((step, setup_mod.StepResult(setup_mod.UNKNOWN, "not checked yet")))
+            console.print(f" [dim]{step.number:>2} ·[/] [dim]{step.title}[/]")
+            continue
+
+        result = step.check()
+
+        if result.state == setup_mod.UNKNOWN and step.question:
+            if interactive:
+                # Show the step, ask underneath it, then replace the line's detail —
+                # so the question reads as part of the row rather than colliding with it.
+                console.print(f" [yellow]{step.number:>2} ?[/] {step.title}")
+                answered = typer.confirm(f"      {step.question}", default=True)
+                if answered:
+                    result = setup_mod.StepResult(setup_mod.OK, "you confirmed this")
+                else:
+                    result = setup_mod.StepResult(
+                        setup_mod.MISSING,
+                        "you said no",
+                        setup_mod.ANSWER_FIXES.get(step.number, []),
+                    )
+                colour = "green" if result.state == setup_mod.OK else "red"
+                mark = TICK if result.state == setup_mod.OK else CROSS
+                console.print(f"      [{colour}]{mark}[/] [dim]{result.detail}[/]")
+                results.append((step, result))
+                if step.required and result.state == setup_mod.MISSING:
+                    blocked = True
+                continue
+
+            result = setup_mod.StepResult(
+                setup_mod.UNKNOWN,
+                "only you can confirm this",
+                setup_mod.ANSWER_FIXES.get(step.number, []),
+            )
+
+        results.append((step, result))
+        _print_step(step, result)
+
+        # Only a verified absence blocks. An unverifiable step ("do you have a shop?")
+        # tells us nothing about whether the next one would pass, so keep checking.
+        if step.required and result.state == setup_mod.MISSING:
+            blocked = True
+
+    done = sum(1 for _s, r in results if r.state == setup_mod.OK)
+    problems = [
+        (s, r)
+        for s, r in results
+        if r.state in (setup_mod.MISSING, setup_mod.UNKNOWN) and r.detail != "not checked yet"
+    ]
+
+    console.print()
+    if not problems:
+        _ok(f"All {len(results)} checks passed. You are ready.")
+        console.print("\nTry: [cyan]etsykit shop info[/]  or  [cyan]etsykit seo audit[/]")
+        return 0
+
+    console.print(f"[bold]{done} of {len(results)} done.[/] What is missing:\n")
+    for step, result in problems:
+        colour = "red" if step.required else "yellow"
+        console.print(f"  [{colour}]{step.number:>2}[/] [bold]{step.title}[/]")
+        if result.detail:
+            console.print(f"     [dim]{result.detail}[/]")
+        for line in result.fix:
+            console.print(f"     {line}")
+        console.print()
+
+    command = setup_mod.next_command(results)
+    if command:
+        console.print(f"[bold]Next:[/] [cyan]{command}[/]")
+    return 1 if any(s.required for s, _r in problems) else 0
+
+
+def _print_step(step: setup_mod.Step, result: setup_mod.StepResult) -> None:
+    marks = {
+        setup_mod.OK: ("green", TICK),
+        setup_mod.MISSING: ("red", CROSS),
+        setup_mod.WARN: ("yellow", "!"),
+        setup_mod.UNKNOWN: ("yellow", "?"),
+    }
+    colour, mark = marks[result.state]
+    console.print(f" [{colour}]{step.number:>2} {mark}[/] {step.title}")
+    if result.detail:
+        console.print(f"     [dim]{result.detail}[/]")
+
+
+@app.command("setup")
+def setup_command(
+    check: bool = typer.Option(
+        False, "--check", help="Do not ask anything — for scripts and CI."
+    ),
+) -> None:
+    """Walk every prerequisite one by one and say exactly what is missing.
+
+    Run this first, and run it again any time something does not work.
+    """
+    raise typer.Exit(_run_checklist(interactive=not check))
+
+
 @app.command("doctor")
 def doctor() -> None:
-    """Check configuration and connectivity before you trust a bulk run."""
-    problems = 0
-    try:
-        config = Config.load()
-        _ok(
-            f"App credentials found (keystring {config.keystring[:6]}…, "
-            f"shared secret {len(config.shared_secret)} chars)"
-        )
-    except EtsyKitError as exc:
-        _fail(str(exc))
-        raise typer.Exit(1) from exc
-
-    try:
-        auth.validate_redirect_uri(config.redirect_uri)
-        _ok(f"Redirect URI looks valid ({config.redirect_uri})")
-    except EtsyKitError as exc:
-        _fail(str(exc))
-        problems += 1
-
-    console.print(f"  rate limit:   {config.rate_per_sec:.0f} req/sec")
-
-    with EtsyClient(config, require_auth=False) as client:
-        try:
-            client.ping()
-            _ok("API reachable and keystring accepted")
-        except EtsyKitError as exc:
-            _fail(f"Ping failed: {exc}")
-            problems += 1
-
-    token = auth.load_token()
-    if token is None:
-        _warn("No token stored — only `seo keywords` will work. Run: etsykit auth login")
-    elif token.expired:
-        _warn("Token expired; it will refresh automatically on the next call.")
-    else:
-        _ok(f"Token valid for {token.seconds_left // 60} more minutes")
-
-    raise typer.Exit(1 if problems else 0)
+    """The same checklist, without asking anything. Good for scripts."""
+    raise typer.Exit(_run_checklist(interactive=False))
 
 
 # ---------------------------------------------------------------- shop
