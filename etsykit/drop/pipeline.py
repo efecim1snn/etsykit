@@ -80,7 +80,7 @@ def estimate_requests(products: int, concepts: int, images_per_product: int) -> 
 
 
 def _batch_name() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S-%f")
 
 
 def _research_concept(
@@ -110,6 +110,7 @@ def run(
     sample: int = 200,
     use_cache: bool = True,
     on_progress: Callable[[str], None] | None = None,
+    exclude_products: set[str] | None = None,
 ) -> DropReport:
     """Composite, research, write copy, and emit review.csv. Nothing is sent to Etsy."""
     workspace.require()
@@ -118,11 +119,14 @@ def run(
         if on_progress:
             on_progress(message)
 
-    designs = workspace.product_files()
+    groups = [
+        (path, images) for path, images in workspace.product_groups()
+        if path.name not in (exclude_products or set())
+    ]
     report = DropReport(batch=_batch_name(), out_dir=workspace.drafts / _batch_name())
     report.out_dir = workspace.drafts / report.batch
 
-    if not designs:
+    if not groups:
         return report
 
     mockups = workspace.mockup_files()[:mockups_per_product]
@@ -134,9 +138,13 @@ def run(
     rows = [
         DropRow(
             source=path,
-            seed=seeds.derive(path, folder_fallback=path.parent != workspace.products),
+            seed=seeds.derive(
+                path / "IMG_0001.jpg" if images else path,
+                folder_fallback=bool(images) or path.parent != workspace.products,
+            ),
+            images=images,
         )
-        for path in designs
+        for path, images in groups
     ]
     grouped = seeds.group([r.seed for r in rows])
     report.concepts = len(grouped)
@@ -154,6 +162,10 @@ def run(
         say(f"researched {concept!r}" + (" (cached)" if from_cache else ""))
 
     for row in rows:
+        if len(row.images) > 10:
+            row.skipped = True
+            row.warnings.append("product folder has more than 10 images; nothing was truncated")
+            continue
         if not row.seed:
             row.skipped = True
             row.warnings.append(row.seed.reason or "no concept could be read from the filename")
@@ -173,7 +185,10 @@ def run(
         stem = row.source.stem
         is_artwork = mockup.looks_like_artwork(row.source)
 
-        if not is_artwork:
+        if row.source.is_dir():
+            # Explicit ready-photo input: never composite or flatten these files.
+            pass
+        elif not is_artwork:
             # A finished product photo needs no compositing; use it as it is.
             row.images = [row.source]
         else:
