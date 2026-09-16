@@ -19,7 +19,7 @@ from . import seo as seo_mod
 from . import setup as setup_mod
 from .client import EtsyClient
 from .config import Config, split_credential, token_path, write_env_file
-from .drop import pipeline
+from .drop import automation, pipeline
 from .drop import template as template_mod
 from .drop import workspace as workspace_mod
 from .errors import AuthError, EtsyKitError
@@ -1199,7 +1199,7 @@ def drop_run(
     ws = _workspace(path).require()
     tmpl = template_mod.Template.from_dict(ws.read_template())
 
-    designs = ws.product_files()
+    designs = ws.product_groups()
     if not designs:
         _warn(f"No designs in {ws.products}. Drop some image files in and run again.")
         raise typer.Exit(1)
@@ -1263,6 +1263,35 @@ def drop_run(
         f"  [cyan]etsykit listings push \"{report.csv_path}\" --dry-run[/]\n"
         f"  [cyan]etsykit listings push \"{report.csv_path}\"[/]   [dim](creates drafts)[/]"
     )
+
+
+@drop_app.command("auto")
+def drop_auto(
+    path: Optional[Path] = typer.Option(None, "--path", help="Etsy Studio folder."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Prepare and validate offline, without uploading."),
+) -> None:
+    """Prepare new products and upload Etsy drafts. Previously attempted products are skipped."""
+    ws = _workspace(path).require()
+    tmpl = template_mod.Template.from_dict(ws.read_template())
+    if dry_run:
+        report = automation.run(ws, tmpl, dry_run=True)
+    else:
+        with _client() as client:
+            report = automation.run(ws, tmpl, client=client)
+    if report.prepared and report.prepared.csv_path:
+        console.print(f"Review: {report.prepared.csv_path}")
+        for product in report.prepared.ready:
+            for warning in product.warnings:
+                _warn(f"{product.source.name}: {warning}")
+    for result in report.uploaded.results:
+        _print_row_result(result)
+    _ok(f"{len(report.already_done)} already uploaded; "
+        f"{len(report.uploaded.results)} validated." if dry_run else
+        f"Created {report.uploaded.created} draft(s); {len(report.already_done)} already uploaded.")
+    for item in report.needs_review:
+        _warn(f"Needs Etsy review before retrying: {item}")
+    if report.needs_review or report.uploaded.errors or report.uploaded.partial:
+        raise typer.Exit(1)
 
 
 def main() -> None:

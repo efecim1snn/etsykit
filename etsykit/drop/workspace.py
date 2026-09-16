@@ -9,6 +9,7 @@ folder names itself in the order you use it.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,13 +36,15 @@ ETSY STUDIO
             You only do this once.
 
 2-PRODUCTS  Put the designs you want listed here. This is the folder you use every
-            time. One design = one listing.
+            time. One loose design = one listing. For ready photos, create one
+            folder per product and put its numbered images inside (01, 02, ...).
+            Name the folder after the product. Run: etsykit drop auto
 
 3-DRAFTS    What comes out. Composited images and review.csv — check it before
             anything is sent to Etsy.
 
-archive/    Designs that have already been listed are moved here, so 2-PRODUCTS
-            always shows only what is still waiting.
+archive/    Optional manual archive. Files are not moved automatically.
+            Keep upload-history.json: it prevents repeated automatic uploads.
 
 Nothing here is ever published. Listings are created as DRAFTS in your Etsy shop
 and stay invisible to buyers until you publish them yourself.
@@ -55,13 +58,15 @@ ETSY STUDIO (TR)
             Bunu sadece bir kez yaparsin.
 
 2-PRODUCTS  Listelemek istedigin tasarimlari buraya koy. Her seferinde
-            kullanacagin klasor bu. Bir tasarim = bir listing.
+            kullanacagin klasor bu. Hazir mockuplar icin her urune ayri bir klasor
+            ac; 01, 02 diye siraladigin resimleri icine koy. Klasore urunun adini
+            ver. Komut: etsykit drop auto. Bir urun klasoru = bir listing.
 
 3-DRAFTS    Cikan sonuc. Giydirilmis gorseller ve review.csv — Etsy'ye bir sey
             gitmeden once buna bak.
 
-archive/    Listelenmis tasarimlar buraya tasinir, boylece 2-PRODUCTS'ta hep
-            sadece bekleyenler kalir.
+archive/    Istersen elle arsivleyebilirsin; otomatik tasima yapilmaz.
+            upload-history.json dosyasini silme; tekrar yuklemeyi onler.
 
 Hicbir sey yayinlanmaz. Listingler Etsy magazanda TASLAK olarak olusturulur ve sen
 kendin yayinlayana kadar alicilar goremez.
@@ -132,6 +137,20 @@ class Workspace:
         files = _images(self.products)
         return [f for f in files if not any(f.stem.endswith(s) for s in exclude_suffixes)]
 
+    def product_groups(self) -> list[tuple[Path, list[Path]]]:
+        """Loose designs retain their old behavior; each folder is one ready product.
+
+        Folder images are already finished mockups, including transparent PNGs.
+        Number them 01, 02, ... to choose their listing order.
+        """
+        groups = [(path, []) for path in self.product_files()]
+        for folder in sorted(self.products.iterdir(), key=lambda p: p.name.casefold()):
+            if folder.is_dir() and not folder.is_symlink():
+                images = _images(folder)
+                if images:
+                    groups.append((folder, sorted(images, key=_natural_key)))
+        return groups
+
     def read_template(self) -> dict[str, Any]:
         if not self.template_path.exists():
             raise ValidationError(
@@ -158,6 +177,10 @@ def _images(folder: Path) -> list[Path]:
         (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES),
         key=lambda p: p.name.lower(),
     )
+
+
+def _natural_key(path: Path) -> list:
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", path.name.casefold())]
 
 
 def default_root() -> Path:

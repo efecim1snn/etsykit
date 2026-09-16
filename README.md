@@ -311,6 +311,59 @@ etsykit listings push current.csv           # push the edits back
 
 ## Drop designs, get drafts
 
+### Ready mockups: one folder, one listing
+
+Put all finished photos for a product in its own folder. The folder name describes
+the product and supplies the title/keyword concept; image names set their order.
+Ready images are uploaded unchanged, even when a PNG has transparency.
+
+```text
+Etsy Studio/
+  product.json
+  2-PRODUCTS/
+    mountain sunset shirt/
+      01-front.jpg
+      02-back.jpg
+      03-detail.png
+    ceramic coffee mug/
+      01-cover.jpg
+      02-detail.jpg
+```
+
+After the usual Etsy login and one-time `etsykit drop template --from-listing ID`:
+
+```bash
+etsykit drop auto --dry-run   # offline preparation and validation
+etsykit drop auto            # prepare and upload new products as Etsy drafts
+```
+
+Use `--path "C:\path\to\Etsy Studio"` to select another workspace. Each command
+processes the current batch once; it does not watch the folder in the background.
+`auto` uploads immediately without another confirmation prompt. It never publishes.
+Run it again after adding more product folders. `drop run` still offers the existing
+CSV-only review workflow and now also understands ready-photo folders.
+
+- One immediate child folder = one listing, with up to 10 images in natural filename
+  order (`1`, `2`, `10`). Extra images cause an error, not silent truncation. Keep
+  finished listing images directly inside each product folder, without nested folders.
+- Loose images retain the original one-design-per-listing mockup workflow below.
+- Titles and tags use the product name and available Etsy research. Descriptions
+  inherit your template; this does not analyze images with AI. Name folders
+  descriptively and use a template matching the product, price and shipping settings.
+- `upload-history.json` records attempted products per shop. Keep this file and
+  keep product folder names stable: completed products are skipped even if edited.
+  Renaming/moving a product or deleting its history can create a duplicate.
+- Interrupted, failed or partial uploads are **not retried automatically**. The
+  command reports that Etsy review is needed and exits with an error. Check the
+  saved listing ID in the history and complete that draft in Etsy; only reset its
+  history entry after confirming no draft was created. A stale `.auto-upload.lock`
+  may be removed only after confirming the previous process is stopped.
+- Automatic upload currently supports physical-product templates. Digital delivery
+  file uploads and inventory variations are not implemented. Source files remain in
+  place; there is no automatic archive move.
+
+### Compositing loose designs
+
 For print-on-demand: put designs in a folder, get composited mockups and a ready-to-push
 CSV. No spreadsheet to fill in by hand.
 
@@ -469,6 +522,7 @@ does not convert, and Etsy weights conversion heavily.
 | `etsykit drop init` | Create the designs-in workspace folder |
 | `etsykit drop template` | Copy settings from a listing you built by hand |
 | `etsykit drop run` | Designs → mockups, titles, tags → `review.csv` |
+| `etsykit drop auto` | Product folders → prepared copy and images → Etsy drafts, with upload history |
 | `etsykit listings template` | Write a starter CSV |
 | `etsykit listings pull` | Export listings to CSV |
 | `etsykit listings push` | Bulk create/update from CSV |
